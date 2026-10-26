@@ -1,6 +1,8 @@
 'use client';
 
 import Link from 'next/link';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { Suspense, useEffect, useRef, useState } from 'react';
 import {
   AlertStatusBadge,
   Button,
@@ -8,6 +10,8 @@ import {
   CardHeader,
   ContractSummaryCard,
   EmptyState,
+  Field,
+  Input,
   SeverityBadge,
   Spinner,
   Stat,
@@ -16,18 +20,56 @@ import {
 } from '@stellar-health/ui';
 import { PageHeader } from '@/components/app-shell';
 import { EventTable } from '@/components/event-table';
-import { useApi } from '@/lib/api';
+import { qs, useApi } from '@/lib/api';
 import type { AlertItem, Contract, EventItem, Page, Status } from '@/lib/types';
 
-export default function OverviewPage() {
-  const contracts = useApi<Page<Contract>>('/contracts', { refreshInterval: 15_000 });
+const SEARCH_DEBOUNCE_MS = 300;
+
+function Overview() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const params = useSearchParams();
+  const query = params.get('q') ?? '';
+  const paramsKey = params.toString();
+  const [draft, setDraft] = useState(query);
+  // Ignore the URL echo of a query this page just wrote, so a late navigation
+  // does not wipe characters typed while that update was in flight.
+  const pushed = useRef(query);
+
+  useEffect(() => {
+    if (query === pushed.current) return;
+    pushed.current = query;
+    setDraft(query);
+  }, [query]);
+
+  useEffect(() => {
+    const next = draft.trim();
+    const id = window.setTimeout(() => {
+      const sp = new URLSearchParams(paramsKey);
+      if ((sp.get('q') ?? '') === next) return;
+      pushed.current = next;
+      if (next) sp.set('q', next);
+      else sp.delete('q');
+      const s = sp.toString();
+      router.replace(s ? `${pathname}?${s}` : pathname, { scroll: false });
+    }, SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(id);
+  }, [draft, paramsKey, pathname, router]);
+
+  const catalog = useApi<Page<Contract>>('/contracts', { refreshInterval: 15_000 });
+  const contracts = useApi<Page<Contract>>(`/contracts${qs({ search: query || undefined })}`, {
+    refreshInterval: 15_000,
+  });
   const events = useApi<Page<EventItem>>('/events?limit=10', { refreshInterval: 10_000 });
   const alerts = useApi<Page<AlertItem>>('/alerts?limit=6', { refreshInterval: 15_000 });
   const status = useApi<Status>('/status', { refreshInterval: 15_000 });
 
+  const allItems = catalog.data?.items ?? [];
   const items = contracts.data?.items ?? [];
   const totals = status.data?.totals;
-  const unhealthy = items.filter((c) => c.health === 'critical' || c.health === 'warning').length;
+  const unhealthy = allItems.filter(
+    (c) => c.health === 'critical' || c.health === 'warning',
+  ).length;
 
   return (
     <div className="space-y-6">
@@ -44,7 +86,7 @@ export default function OverviewPage() {
       <section className="grid grid-cols-2 gap-3 lg:grid-cols-4" aria-label="Summary">
         <Stat
           label="Monitored contracts"
-          value={items.length}
+          value={allItems.length}
           hint={unhealthy ? `${unhealthy} need attention` : 'All healthy'}
           tone={unhealthy ? 'yellow' : undefined}
         />
@@ -67,9 +109,9 @@ export default function OverviewPage() {
             <h2 id="contracts-heading" className="mb-3 text-sm font-semibold">
               Contracts
             </h2>
-            {contracts.isLoading ? (
+            {!catalog.data && catalog.isLoading ? (
               <Spinner />
-            ) : items.length === 0 ? (
+            ) : allItems.length === 0 && !query ? (
               <Card>
                 <EmptyState
                   title="No contracts yet"
@@ -82,16 +124,40 @@ export default function OverviewPage() {
                 />
               </Card>
             ) : (
-              <div className="grid gap-3 sm:grid-cols-2">
-                {items.map((c) => (
-                  <ContractSummaryCard
-                    key={c.id}
-                    contract={c}
-                    href={`/contracts/${c.id}`}
-                    LinkComponent={Link}
-                  />
-                ))}
-              </div>
+              <>
+                <div className="mb-3 max-w-md">
+                  <Field label="Search contracts" htmlFor="contract-search">
+                    <Input
+                      id="contract-search"
+                      type="search"
+                      value={draft}
+                      placeholder="Label or contract ID"
+                      onChange={(e) => setDraft(e.target.value)}
+                    />
+                  </Field>
+                </div>
+                {!contracts.data && contracts.isLoading ? (
+                  <Spinner />
+                ) : items.length === 0 ? (
+                  <Card>
+                    <EmptyState
+                      title="No contracts match"
+                      description="Try a different label or contract ID."
+                    />
+                  </Card>
+                ) : (
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {items.map((c) => (
+                      <ContractSummaryCard
+                        key={c.id}
+                        contract={c}
+                        href={`/contracts/${c.id}`}
+                        LinkComponent={Link}
+                      />
+                    ))}
+                  </div>
+                )}
+              </>
             )}
           </section>
 
@@ -201,6 +267,14 @@ export default function OverviewPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function OverviewPage() {
+  return (
+    <Suspense fallback={<Spinner />}>
+      <Overview />
+    </Suspense>
   );
 }
 
