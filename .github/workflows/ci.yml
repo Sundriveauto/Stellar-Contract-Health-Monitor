@@ -73,9 +73,13 @@ jobs:
           retention-days: 7
 
   docker:
-    name: Build images
+    name: Build and scan images
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     strategy:
+      fail-fast: false
       matrix:
         target: [api, worker, web]
     steps:
@@ -86,6 +90,31 @@ jobs:
           context: .
           file: docker/Dockerfile
           target: ${{ matrix.target }}
+          tags: stellar-health-${{ matrix.target }}:ci
+          load: true
           push: false
           cache-from: type=gha,scope=${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+      - name: Scan for vulnerabilities (report)
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: stellar-health-${{ matrix.target }}:ci
+          format: sarif
+          output: trivy-${{ matrix.target }}.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+      - name: Upload scan results
+        if: always() && github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-${{ matrix.target }}.sarif
+          category: trivy-${{ matrix.target }}
+      - name: Fail on fixable critical vulnerabilities
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: stellar-health-${{ matrix.target }}:ci
+          format: table
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+          skip-setup-trivy: true
