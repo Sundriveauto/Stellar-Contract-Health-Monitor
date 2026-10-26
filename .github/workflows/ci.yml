@@ -103,6 +103,7 @@ jobs:
           output: trivy-${{ matrix.target }}.sarif
           severity: CRITICAL,HIGH
           ignore-unfixed: true
+          trivyignores: .trivyignore
       - name: Upload scan results
         # Fork PRs get a read-only token, so only upload for pushes and same-repo PRs.
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
@@ -117,5 +118,6 @@ jobs:
           format: table
           severity: CRITICAL
           ignore-unfixed: true
+          trivyignores: .trivyignore
           exit-code: '1'
           skip-setup-trivy: true
