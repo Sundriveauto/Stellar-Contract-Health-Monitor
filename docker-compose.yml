@@ -1,0 +1,103 @@
+# Production-style deployment of the full stack.
+#   cp .env.example .env   # then set ADMIN_API_TOKEN and POSTGRES_PASSWORD
+#   docker compose up -d --build
+# Dashboard: http://localhost:${WEB_PORT:-3000}. The API is only reachable through the dashboard
+# unless you publish its port.
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql://schm:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/schm?schema=public
+  REDIS_URL: redis://redis:6379
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  TESTNET_RPC_URL: ${TESTNET_RPC_URL:-}
+  MAINNET_RPC_URL: ${MAINNET_RPC_URL:-}
+  FUTURENET_RPC_URL: ${FUTURENET_RPC_URL:-}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: schm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: schm
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U schm -h 127.0.0.1']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # BullMQ requires noeviction; AOF keeps queued jobs across restarts.
+    command: ['redis-server', '--appendonly', 'yes', '--maxmemory-policy', 'noeviction']
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build: { context: ., dockerfile: docker/Dockerfile, target: api }
+    image: stellar-health-api
+    command: ['./node_modules/.bin/prisma', 'migrate', 'deploy', '--schema', 'prisma/schema.prisma']
+    environment: *app-env
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: 'no'
+
+  api:
+    build: { context: ., dockerfile: docker/Dockerfile, target: api }
+    image: stellar-health-api
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      NODE_ENV: production
+      API_PORT: 4000
+      ADMIN_API_TOKEN: ${ADMIN_API_TOKEN:?set ADMIN_API_TOKEN}
+      INITIAL_LOOKBACK_LEDGERS: ${INITIAL_LOOKBACK_LEDGERS:-17280}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
+      TRUST_PROXY: 'true'
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+  worker:
+    build: { context: ., dockerfile: docker/Dockerfile, target: worker }
+    image: stellar-health-worker
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      NODE_ENV: production
+      WEBHOOK_BLOCK_PRIVATE_IPS: ${WEBHOOK_BLOCK_PRIVATE_IPS:-true}
+      EVENT_RETENTION_DAYS: ${EVENT_RETENTION_DAYS:-30}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-Stellar Health Monitor <alerts@example.com>}
+      PUBLIC_DASHBOARD_URL: ${PUBLIC_DASHBOARD_URL:-http://localhost:3000}
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+  web:
+    build: { context: ., dockerfile: docker/Dockerfile, target: web }
+    image: stellar-health-web
+    restart: unless-stopped
+    environment:
+      API_URL: http://api:4000
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+    ports:
+      - '${WEB_PORT:-3000}:3000'
+    depends_on:
+      api: { condition: service_healthy }
+
+volumes:
+  pgdata:
+  redisdata:

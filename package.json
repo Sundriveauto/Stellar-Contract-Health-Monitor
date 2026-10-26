@@ -1,0 +1,40 @@
+{
+  "name": "stellar-contract-health",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Monitoring platform for Stellar (Soroban) smart contracts",
+  "license": "MIT",
+  "packageManager": "pnpm@10.34.7",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter \"./apps/*\" dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "pnpm -r test",
+    "test:integration": "pnpm --workspace-concurrency=1 --filter @stellar-health/api --filter @stellar-health/worker test:integration",
+    "test:e2e": "playwright test",
+    "db:generate": "pnpm --filter @stellar-health/db generate",
+    "db:migrate": "pnpm --filter @stellar-health/db migrate:dev",
+    "db:deploy": "pnpm --filter @stellar-health/db migrate:deploy",
+    "db:seed": "pnpm --filter @stellar-health/db seed",
+    "services:up": "docker compose -f docker-compose.dev.yml up -d",
+    "services:down": "docker compose -f docker-compose.dev.yml down"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^22.18.0",
+    "eslint": "^9.39.0",
+    "globals": "^16.4.0",
+    "prettier": "^3.6.0",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.46.0",
+    "vitest": "^3.2.4"
+  }
+}

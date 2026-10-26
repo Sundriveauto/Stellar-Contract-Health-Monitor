@@ -1,0 +1,200 @@
+import { signWebhook } from '@stellar-health/alert-engine';
+import {
+  WEBHOOK_DELIVERY_HEADER,
+  WEBHOOK_SIGNATURE_HEADER,
+  WEBHOOK_TIMESTAMP_HEADER,
+  emailConfigSchema,
+  webhookConfigSchema,
+  type WebhookPayload,
+} from '@stellar-health/shared-types';
+import type { WorkerDeps } from './deps';
+import { assertPublicUrl } from './ssrf';
+
+/** Delivery failed in a way retries cannot fix (bad config, 4xx response, disabled destination). */
+export class PermanentDeliveryError extends Error {}
+
+export interface Mailer {
+  send(opts: { to: string[]; subject: string; text: string }): Promise<void>;
+}
+
+export interface DeliveryDeps extends WorkerDeps {
+  mailer: Mailer | null;
+  fetchImpl?: typeof fetch;
+}
+
+export async function buildPayload(deps: WorkerDeps, deliveryId: string): Promise<WebhookPayload> {
+  const delivery = await deps.prisma.notificationDelivery.findUniqueOrThrow({
+    where: { id: deliveryId },
+    include: {
+      alert: {
+        include: {
+          rule: { select: { id: true, name: true, type: true } },
+          contract: { select: { id: true, contractId: true, network: true, label: true } },
+        },
+      },
+    },
+  });
+  const sentAt = deps.now().toISOString();
+  if (delivery.kind === 'test' || !delivery.alert) {
+    return {
+      version: 1,
+      deliveryId,
+      type: 'test',
+      sentAt,
+      alert: {
+        id: 'test',
+        title: 'Test notification from Stellar Contract Health Monitor',
+        message: 'If you can read this, your destination is configured correctly.',
+        severity: 'INFO',
+        status: 'TRIGGERED',
+        triggeredAt: sentAt,
+        rule: null,
+        contract: null,
+        context: {},
+      },
+    };
+  }
+  const a = delivery.alert;
+  return {
+    version: 1,
+    deliveryId,
+    type: delivery.kind === 'alert.resolved' ? 'alert.resolved' : 'alert.triggered',
+    sentAt,
+    alert: {
+      id: a.id,
+      title: a.title,
+      message: a.message,
+      severity: a.severity,
+      status: a.status,
+      triggeredAt: a.triggeredAt.toISOString(),
+      rule: a.rule,
+      contract: a.contract,
+      context: (a.context ?? {}) as Record<string, unknown>,
+    },
+  };
+}
+
+async function sendWebhook(deps: DeliveryDeps, config: unknown, payload: WebhookPayload) {
+  const parsed = webhookConfigSchema.safeParse(config);
+  if (!parsed.success || !parsed.data.secret)
+    throw new PermanentDeliveryError('Invalid webhook configuration');
+  const { url, secret, headers } = parsed.data;
+  if (deps.config.WEBHOOK_BLOCK_PRIVATE_IPS) {
+    try {
+      await assertPublicUrl(url);
+    } catch (err) {
+      throw new PermanentDeliveryError((err as Error).message);
+    }
+  }
+  const body = JSON.stringify(payload);
+  const timestamp = Math.floor(deps.now().getTime() / 1000);
+  const res = await (deps.fetchImpl ?? fetch)(url, {
+    method: 'POST',
+    redirect: 'manual',
+    signal: AbortSignal.timeout(deps.config.WEBHOOK_TIMEOUT_MS),
+    headers: {
+      ...headers,
+      'content-type': 'application/json',
+      'user-agent': 'stellar-contract-health-monitor/1.0',
+      [WEBHOOK_SIGNATURE_HEADER]: signWebhook(secret, timestamp, body),
+      [WEBHOOK_TIMESTAMP_HEADER]: String(timestamp),
+      [WEBHOOK_DELIVERY_HEADER]: payload.deliveryId,
+    },
+    body,
+  });
+  if (res.ok) return res.status;
+  const text = (await res.text().catch(() => '')).slice(0, 300);
+  const msg = `Webhook responded ${res.status}${text ? `: ${text}` : ''}`;
+  // 408/429 and 5xx are worth retrying; other 4xx (and redirects) won't fix themselves.
+  if (res.status === 408 || res.status === 429 || res.status >= 500) {
+    throw Object.assign(new Error(msg), { responseStatus: res.status });
+  }
+  throw Object.assign(new PermanentDeliveryError(msg), { responseStatus: res.status });
+}
+
+async function sendEmail(deps: DeliveryDeps, config: unknown, payload: WebhookPayload) {
+  if (!deps.mailer)
+    throw new PermanentDeliveryError('Email is not configured on this server (SMTP_HOST is empty)');
+  const parsed = emailConfigSchema.safeParse(config);
+  if (!parsed.success) throw new PermanentDeliveryError('Invalid email configuration');
+  const a = payload.alert;
+  const prefix = payload.type === 'alert.resolved' ? '[RESOLVED]' : `[${a.severity}]`;
+  const link =
+    a.id !== 'test'
+      ? `${deps.config.PUBLIC_DASHBOARD_URL.replace(/\/$/, '')}/alerts/history?alert=${a.id}`
+      : '';
+  const contractLine = a.contract
+    ? `Contract: ${a.contract.label ?? ''} ${a.contract.contractId} (${a.contract.network})\n`
+    : '';
+  await deps.mailer.send({
+    to: parsed.data.to,
+    subject: `${prefix} ${a.title}`.slice(0, 200),
+    text: `${a.title}\n\n${a.message}\n\n${contractLine}Triggered: ${a.triggeredAt}\n${link ? `\nView in dashboard: ${link}\n` : ''}`,
+  });
+}
+
+/**
+ * Attempts one delivery. Throws on failure so the queue retries with backoff;
+ * `isFinalAttempt` lets us mark the delivery FAILED when no retries remain.
+ */
+export async function deliverNotification(
+  deps: DeliveryDeps,
+  deliveryId: string,
+  attempt: { number: number; isFinalAttempt: boolean },
+): Promise<'sent' | 'skipped'> {
+  const delivery = await deps.prisma.notificationDelivery.findUnique({
+    where: { id: deliveryId },
+    include: { destination: true },
+  });
+  if (!delivery || delivery.status === 'SUCCEEDED') return 'skipped';
+  const type = delivery.destination.type;
+  const started = Date.now();
+  let responseStatus: number | null = null;
+
+  try {
+    if (!delivery.destination.enabled) throw new PermanentDeliveryError('Destination is disabled');
+    const payload = await buildPayload(deps, deliveryId);
+    if (type === 'WEBHOOK')
+      responseStatus = await sendWebhook(deps, delivery.destination.config, payload);
+    else await sendEmail(deps, delivery.destination.config, payload);
+
+    await deps.prisma.notificationDelivery.update({
+      where: { id: deliveryId },
+      data: {
+        status: 'SUCCEEDED',
+        attempts: attempt.number,
+        responseStatus,
+        lastError: null,
+        lastAttemptAt: deps.now(),
+        deliveredAt: deps.now(),
+      },
+    });
+    deps.metrics.deliveries.labels(type, 'success').inc();
+    return 'sent';
+  } catch (err) {
+    const permanent = err instanceof PermanentDeliveryError;
+    const final = permanent || attempt.isFinalAttempt;
+    const message =
+      (err as Error).name === 'TimeoutError'
+        ? `Timed out after ${deps.config.WEBHOOK_TIMEOUT_MS}ms`
+        : (err as Error).message;
+    await deps.prisma.notificationDelivery.update({
+      where: { id: deliveryId },
+      data: {
+        status: final ? 'FAILED' : 'PENDING',
+        attempts: attempt.number,
+        responseStatus: (err as { responseStatus?: number }).responseStatus ?? null,
+        lastError: message.slice(0, 1000),
+        lastAttemptAt: deps.now(),
+      },
+    });
+    deps.metrics.deliveries.labels(type, final ? 'failed' : 'retry').inc();
+    deps.logger.warn(
+      { deliveryId, attempt: attempt.number, final, err: message },
+      'notification delivery failed',
+    );
+    throw err;
+  } finally {
+    deps.metrics.deliveryDuration.labels(type).observe((Date.now() - started) / 1000);
+  }
+}

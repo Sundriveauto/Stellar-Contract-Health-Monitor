@@ -1,0 +1,272 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Network {
+  TESTNET
+  MAINNET
+  FUTURENET
+  LOCAL
+}
+
+enum ContractStatus {
+  ACTIVE
+  PAUSED
+  ERROR
+}
+
+enum StorageEntryKind {
+  INSTANCE
+  CODE
+  PERSISTENT
+  TEMPORARY
+}
+
+enum AlertRuleType {
+  EVENT_MATCH
+  TTL_EXPIRY
+  INACTIVITY
+}
+
+enum AlertSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+enum AlertStatus {
+  TRIGGERED
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+enum DestinationType {
+  WEBHOOK
+  EMAIL
+}
+
+enum DeliveryStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+
+/// RPC provider configuration per network. Falls back to env/defaults when absent.
+model NetworkConfig {
+  network           Network  @id
+  rpcUrl            String
+  networkPassphrase String
+  enabled           Boolean  @default(true)
+  updatedAt         DateTime @updatedAt
+}
+
+/// Ingestion progress for a network-wide view (health and lag reporting).
+model NetworkState {
+  network            Network   @id
+  latestLedger       Int?
+  oldestLedger       Int?
+  lastCheckedAt      DateTime?
+  lastError          String?
+  updatedAt          DateTime  @updatedAt
+}
+
+model Contract {
+  id                  String         @id @default(cuid())
+  contractId          String
+  network             Network
+  label               String?
+  status              ContractStatus @default(ACTIVE)
+  /// "wasm" or "stellar_asset"
+  executableType      String?
+  wasmHash            String?
+  /// Opaque RPC paging cursor; ingestion resumes from here.
+  cursor              String?
+  /// Ledger ingestion starts from when no cursor is stored (or the cursor fell out of retention).
+  startLedger         Int
+  lastIngestedLedger  Int?
+  lastEventAt         DateTime?
+  lastPolledAt        DateTime?
+  lastError           String?
+  consecutiveFailures Int            @default(0)
+  /// Set when ingestion skipped ledgers because they fell outside the RPC retention window.
+  gapDetectedAt       DateTime?
+  eventCount          Int            @default(0)
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  events         Event[]
+  storageEntries StorageEntry[]
+  alertRules     AlertRule[]
+  alerts         Alert[]
+
+  @@unique([network, contractId])
+  @@index([status])
+}
+
+model Event {
+  id                       String   @id @default(cuid())
+  contractRefId            String
+  contract                 Contract @relation(fields: [contractRefId], references: [id], onDelete: Cascade)
+  /// RPC event id ("<toid>-<index>"), lexicographically ordered within a network.
+  eventId                  String
+  network                  Network
+  type                     String
+  ledger                   Int
+  ledgerClosedAt           DateTime
+  txHash                   String
+  /// Display form of each topic (used for filtering and alert matching).
+  topics                   String[]
+  topicsXdr                String[]
+  /// Decoded value (BigInts as strings, bytes as hex).
+  value                    Json
+  valueXdr                 String
+  inSuccessfulContractCall Boolean  @default(true)
+  createdAt                DateTime @default(now())
+
+  @@unique([contractRefId, eventId])
+  @@index([contractRefId, ledger(sort: Desc), eventId(sort: Desc)])
+  @@index([ledger(sort: Desc), eventId(sort: Desc)])
+  @@index([txHash])
+  @@index([ledgerClosedAt])
+}
+
+model StorageEntry {
+  id                String           @id @default(cuid())
+  contractRefId     String
+  contract          Contract         @relation(fields: [contractRefId], references: [id], onDelete: Cascade)
+  kind              StorageEntryKind
+  label             String
+  /// Base64 XDR of the LedgerKey being monitored.
+  ledgerKeyXdr      String
+  exists            Boolean          @default(true)
+  liveUntilLedger   Int?
+  lastCheckedLedger Int?
+  lastCheckedAt     DateTime?
+  lastError         String?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  @@unique([contractRefId, ledgerKeyXdr])
+}
+
+model AlertRule {
+  id              String                    @id @default(cuid())
+  name            String
+  type            AlertRuleType
+  /// Null means the rule applies to every contract.
+  contractRefId   String?
+  contract        Contract?                 @relation(fields: [contractRefId], references: [id], onDelete: Cascade)
+  enabled         Boolean                   @default(true)
+  severity        AlertSeverity             @default(WARNING)
+  config          Json
+  cooldownSeconds Int                       @default(300)
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+  destinations    NotificationDestination[]
+  alerts          Alert[]
+  states          AlertRuleState[]
+
+  @@index([contractRefId])
+}
+
+/// Per (rule, contract) evaluation state: cooldowns and whether the condition is currently active.
+model AlertRuleState {
+  ruleId          String
+  rule            AlertRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  contractRefId   String
+  lastTriggeredAt DateTime?
+  /// For level-based rules (TTL, inactivity): the currently open alert, if any.
+  openAlertId     String?
+  updatedAt       DateTime  @updatedAt
+
+  @@id([ruleId, contractRefId])
+}
+
+model NotificationDestination {
+  id         String                 @id @default(cuid())
+  name       String
+  type       DestinationType
+  enabled    Boolean                @default(true)
+  /// WEBHOOK: { url, secret, headers? }  EMAIL: { to: string[] }
+  config     Json
+  createdAt  DateTime               @default(now())
+  updatedAt  DateTime               @updatedAt
+  rules      AlertRule[]
+  deliveries NotificationDelivery[]
+}
+
+model Alert {
+  id             String                 @id @default(cuid())
+  ruleId         String?
+  rule           AlertRule?             @relation(fields: [ruleId], references: [id], onDelete: SetNull)
+  contractRefId  String?
+  contract       Contract?              @relation(fields: [contractRefId], references: [id], onDelete: Cascade)
+  status         AlertStatus            @default(TRIGGERED)
+  severity       AlertSeverity
+  title          String
+  message        String
+  context        Json
+  triggeredAt    DateTime               @default(now())
+  acknowledgedAt DateTime?
+  acknowledgedBy String?
+  resolvedAt     DateTime?
+  deliveries     NotificationDelivery[]
+
+  @@index([triggeredAt(sort: Desc)])
+  @@index([status])
+  @@index([contractRefId])
+  @@index([ruleId])
+}
+
+model NotificationDelivery {
+  id             String                  @id @default(cuid())
+  alertId        String?
+  alert          Alert?                  @relation(fields: [alertId], references: [id], onDelete: Cascade)
+  destinationId  String
+  destination    NotificationDestination @relation(fields: [destinationId], references: [id], onDelete: Cascade)
+  /// alert.triggered | alert.resolved | test
+  kind           String                  @default("alert.triggered")
+  status         DeliveryStatus          @default(PENDING)
+  attempts       Int                     @default(0)
+  maxAttempts    Int                     @default(6)
+  responseStatus Int?
+  lastError      String?
+  lastAttemptAt  DateTime?
+  deliveredAt    DateTime?
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+
+  @@index([status])
+  @@index([alertId])
+  @@index([destinationId])
+}
+
+model ApiToken {
+  id         String    @id @default(cuid())
+  name       String
+  /// SHA-256 hash of the token; the plaintext is only shown once at creation.
+  tokenHash  String    @unique
+  /// First characters of the token, for identification in the UI.
+  prefix     String
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+}
+
+model Setting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}
+
+model WorkerHeartbeat {
+  name       String   @id
+  lastBeatAt DateTime
+  info       Json
+}

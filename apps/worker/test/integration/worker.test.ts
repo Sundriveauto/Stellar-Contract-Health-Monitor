@@ -1,0 +1,420 @@
+import { createServer, type IncomingMessage, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { verifyWebhookSignature } from '@stellar-health/alert-engine';
+import { disconnectPrisma, getPrisma } from '@stellar-health/db';
+import { resetDatabase } from '../../../../tests/support/test-db';
+import { deliverNotification } from '../../src/delivery';
+import { checkInactivity } from '../../src/inactivity';
+import { ingestContract } from '../../src/ingest';
+import { pruneOldData } from '../../src/maintenance';
+import { checkStorage } from '../../src/storage';
+import { createContract, createHarness, type Harness } from './helpers';
+
+const prisma = getPrisma();
+const past = (ms: number) => new Date(Date.now() - ms);
+let h: Harness;
+
+beforeEach(async () => {
+  await resetDatabase(prisma);
+  h = createHarness();
+});
+afterAll(async () => {
+  await disconnectPrisma();
+});
+
+async function webhookDestination(url: string, secret = 'whsec_test_secret_0123456789') {
+  return prisma.notificationDestination.create({
+    data: { name: 'hook', type: 'WEBHOOK', config: { url, secret } },
+  });
+}
+
+describe('event ingestion', () => {
+  it('stores events across pages, persists the cursor and does not re-insert on the next poll', async () => {
+    const c = await createContract(1, { startLedger: 600 });
+    for (let i = 0; i < 12; i++) h.rpc.emit(c.contractId, 700 + i, ['transfer', 'GA', 'GB']);
+    h.rpc.emit('COTHER', 705, ['transfer']);
+
+    const first = await ingestContract(h.deps, c.id);
+    expect(first).toMatchObject({ inserted: 12, pages: 3, gap: false });
+    const row = await prisma.contract.findUniqueOrThrow({ where: { id: c.id } });
+    expect(row.cursor).toBeTruthy();
+    expect(row.eventCount).toBe(12);
+    expect(row.lastIngestedLedger).toBe(1000);
+    expect(await prisma.networkState.findUnique({ where: { network: 'TESTNET' } })).toMatchObject({
+      latestLedger: 1000,
+    });
+
+    h.rpc.emit(c.contractId, 1001, ['mint']);
+    const second = await ingestContract(h.deps, c.id);
+    expect(second.inserted).toBe(1);
+    expect(h.rpc.calls.at(-1)).toHaveProperty('cursor');
+    expect(await prisma.event.count({ where: { contractRefId: c.id } })).toBe(13);
+  });
+
+  it('clamps a stale start ledger to the retention window and records a gap when history was lost', async () => {
+    const c = await createContract(2, { startLedger: 100 });
+    h.rpc.emit(c.contractId, 800, ['x']);
+    const fresh = await ingestContract(h.deps, c.id);
+    // First ever poll: starting late is expected, not a gap.
+    expect(fresh).toMatchObject({ inserted: 1, gap: false });
+
+    // Simulate the worker being down long enough for the cursor to fall out of retention.
+    h.rpc.health.oldestLedger = 2000;
+    h.rpc.health.latestLedger = 2500;
+    h.rpc.emit(c.contractId, 2100, ['y']);
+    const resumed = await ingestContract(h.deps, c.id);
+    expect(resumed).toMatchObject({ inserted: 1, gap: true });
+    const row = await prisma.contract.findUniqueOrThrow({ where: { id: c.id } });
+    expect(row.gapDetectedAt).not.toBeNull();
+  });
+
+  it('records failures on the contract and skips paused contracts', async () => {
+    const c = await createContract(3);
+    h.deps.getClient = async () => {
+      throw new Error('rpc down');
+    };
+    await expect(ingestContract(h.deps, c.id)).rejects.toThrow('rpc down');
+    expect(await prisma.contract.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({
+      consecutiveFailures: 1,
+      lastError: 'rpc down',
+    });
+
+    await prisma.contract.update({ where: { id: c.id }, data: { status: 'PAUSED' } });
+    expect((await ingestContract(h.deps, c.id)).skipped).toBe('not_active');
+    expect((await ingestContract(h.deps, 'missing')).skipped).toBe('not_found');
+  });
+});
+
+describe('event alert rules', () => {
+  it('triggers on matching new events, queues deliveries and respects cooldown', async () => {
+    const c = await createContract(10, { createdAt: past(3600_000) });
+    const d = await webhookDestination('https://example.com/hook');
+    await prisma.alertRule.create({
+      data: {
+        name: 'Transfers',
+        type: 'EVENT_MATCH',
+        contractRefId: c.id,
+        cooldownSeconds: 600,
+        config: { topics: ['transfer', '**'] },
+        destinations: { connect: [{ id: d.id }] },
+        createdAt: past(3600_000),
+      },
+    });
+    h.rpc.emit(c.contractId, 700, ['mint']);
+    await ingestContract(h.deps, c.id);
+    expect(await prisma.alert.count()).toBe(0);
+
+    h.rpc.emit(c.contractId, 701, ['transfer', 'GA']);
+    await ingestContract(h.deps, c.id);
+    const alerts = await prisma.alert.findMany({ include: { deliveries: true } });
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]!.deliveries).toHaveLength(1);
+    expect(h.queued).toEqual([alerts[0]!.deliveries[0]!.id]);
+
+    h.rpc.emit(c.contractId, 702, ['transfer', 'GB']);
+    await ingestContract(h.deps, c.id);
+    expect(await prisma.alert.count()).toBe(1);
+  });
+
+  it('does not alert on events backfilled from before the rule existed', async () => {
+    const c = await createContract(11);
+    await prisma.alertRule.create({ data: { name: 'Any', type: 'EVENT_MATCH', config: {} } });
+    h.rpc.emit(c.contractId, 700, ['old'], past(3 * 3600_000));
+    await ingestContract(h.deps, c.id);
+    expect(await prisma.event.count()).toBe(1);
+    expect(await prisma.alert.count()).toBe(0);
+  });
+
+  it('honours count thresholds within a window', async () => {
+    const c = await createContract(12, { createdAt: past(3600_000) });
+    await prisma.alertRule.create({
+      data: {
+        name: 'Burst',
+        type: 'EVENT_MATCH',
+        config: { threshold: 3, windowSeconds: 300 },
+        createdAt: past(3600_000),
+      },
+    });
+    h.rpc.emit(c.contractId, 700, ['a']);
+    h.rpc.emit(c.contractId, 701, ['a']);
+    await ingestContract(h.deps, c.id);
+    expect(await prisma.alert.count()).toBe(0);
+    h.rpc.emit(c.contractId, 702, ['a']);
+    await ingestContract(h.deps, c.id);
+    expect(await prisma.alert.count()).toBe(1);
+  });
+});
+
+describe('storage TTL and inactivity rules', () => {
+  it('opens one alert while an entry is near expiry and resolves it once extended', async () => {
+    const c = await createContract(20);
+    await prisma.storageEntry.create({
+      data: { contractRefId: c.id, kind: 'INSTANCE', label: 'Instance', ledgerKeyXdr: 'key-1' },
+    });
+    await prisma.alertRule.create({
+      data: {
+        name: 'TTL',
+        type: 'TTL_EXPIRY',
+        cooldownSeconds: 0,
+        config: { ledgersThreshold: 1000 },
+      },
+    });
+    h.rpc.ttls.set('key-1', {
+      ledgerKeyXdr: 'key-1',
+      exists: true,
+      liveUntilLedger: 1500,
+      lastModifiedLedger: 1,
+    });
+
+    await checkStorage(h.deps, c.id);
+    await checkStorage(h.deps, c.id);
+    const open = await prisma.alert.findMany();
+    expect(open).toHaveLength(1);
+    expect(open[0]!.status).toBe('TRIGGERED');
+    expect(await prisma.storageEntry.findFirstOrThrow()).toMatchObject({
+      exists: true,
+      liveUntilLedger: 1500,
+    });
+
+    h.rpc.ttls.set('key-1', {
+      ledgerKeyXdr: 'key-1',
+      exists: true,
+      liveUntilLedger: 500_000,
+      lastModifiedLedger: 2,
+    });
+    await checkStorage(h.deps, c.id);
+    expect((await prisma.alert.findUniqueOrThrow({ where: { id: open[0]!.id } })).status).toBe(
+      'RESOLVED',
+    );
+  });
+
+  it('notifies on resolve when the preference is set', async () => {
+    const c = await createContract(21);
+    const d = await webhookDestination('https://example.com/hook');
+    await prisma.setting.create({
+      data: {
+        key: 'notificationPreferences',
+        value: { notifyOnResolve: true, defaultDestinationIds: [d.id] },
+      },
+    });
+    await prisma.storageEntry.create({
+      data: { contractRefId: c.id, kind: 'INSTANCE', label: 'I', ledgerKeyXdr: 'k' },
+    });
+    await prisma.alertRule.create({
+      data: {
+        name: 'TTL',
+        type: 'TTL_EXPIRY',
+        cooldownSeconds: 0,
+        config: { ledgersThreshold: 1000 },
+      },
+    });
+    h.rpc.ttls.set('k', {
+      ledgerKeyXdr: 'k',
+      exists: true,
+      liveUntilLedger: 1200,
+      lastModifiedLedger: 1,
+    });
+    await checkStorage(h.deps, c.id);
+    h.rpc.ttls.set('k', {
+      ledgerKeyXdr: 'k',
+      exists: true,
+      liveUntilLedger: 900_000,
+      lastModifiedLedger: 1,
+    });
+    await checkStorage(h.deps, c.id);
+    const kinds = (
+      await prisma.notificationDelivery.findMany({ orderBy: { createdAt: 'asc' } })
+    ).map((x) => x.kind);
+    expect(kinds).toEqual(['alert.triggered', 'alert.resolved']);
+  });
+
+  it('alerts when a polled contract has been silent too long and resolves when activity resumes', async () => {
+    const c = await createContract(22, { createdAt: past(7200_000) });
+    await prisma.contract.update({
+      where: { id: c.id },
+      data: { lastPolledAt: new Date(), lastEventAt: past(7200_000) },
+    });
+    await prisma.alertRule.create({
+      data: {
+        name: 'Quiet',
+        type: 'INACTIVITY',
+        cooldownSeconds: 0,
+        config: { windowSeconds: 3600 },
+        createdAt: past(7200_000),
+      },
+    });
+    await checkInactivity(h.deps);
+    const [alert] = await prisma.alert.findMany();
+    expect(alert?.status).toBe('TRIGGERED');
+
+    await prisma.contract.update({ where: { id: c.id }, data: { lastEventAt: new Date() } });
+    await checkInactivity(h.deps);
+    expect((await prisma.alert.findUniqueOrThrow({ where: { id: alert!.id } })).status).toBe(
+      'RESOLVED',
+    );
+  });
+});
+
+describe('webhook delivery', () => {
+  let server: Server;
+  let url: string;
+  let respond: number;
+  let received: { headers: IncomingMessage['headers']; body: string }[];
+
+  beforeAll(async () => {
+    server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => (body += c));
+      req.on('end', () => {
+        received.push({ headers: req.headers, body });
+        res.statusCode = respond;
+        res.end(respond >= 400 ? 'nope' : 'ok');
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/hook`;
+  });
+  afterAll(() => new Promise<void>((r) => server.close(() => r())));
+  beforeEach(() => {
+    respond = 200;
+    received = [];
+  });
+
+  async function pendingAlertDelivery() {
+    const c = await createContract(30);
+    const d = await webhookDestination(url);
+    const alert = await prisma.alert.create({
+      data: {
+        contractRefId: c.id,
+        severity: 'CRITICAL',
+        title: 'Big transfer',
+        message: 'A transfer happened',
+        context: { ledger: 700 },
+        deliveries: { create: { destinationId: d.id, kind: 'alert.triggered' } },
+      },
+      include: { deliveries: true },
+    });
+    return { delivery: alert.deliveries[0]!, alert, contract: c };
+  }
+
+  it('POSTs a signed, versioned payload and marks the delivery succeeded', async () => {
+    const { delivery, alert, contract } = await pendingAlertDelivery();
+    await expect(
+      deliverNotification(h.deps, delivery.id, { number: 1, isFinalAttempt: false }),
+    ).resolves.toBe('sent');
+    expect(received).toHaveLength(1);
+    const { headers, body } = received[0]!;
+    expect(
+      verifyWebhookSignature({
+        secret: 'whsec_test_secret_0123456789',
+        timestamp: Number(headers['x-schm-timestamp']),
+        body,
+        signature: String(headers['x-schm-signature']),
+      }),
+    ).toBe(true);
+    expect(headers['x-schm-delivery']).toBe(delivery.id);
+    const payload = JSON.parse(body);
+    expect(payload).toMatchObject({
+      version: 1,
+      type: 'alert.triggered',
+      alert: {
+        id: alert.id,
+        severity: 'CRITICAL',
+        contract: { contractId: contract.contractId, network: 'TESTNET' },
+      },
+    });
+    expect(
+      await prisma.notificationDelivery.findUniqueOrThrow({ where: { id: delivery.id } }),
+    ).toMatchObject({
+      status: 'SUCCEEDED',
+      attempts: 1,
+      responseStatus: 200,
+    });
+    // A redelivered job for an already-succeeded delivery is a no-op.
+    expect(
+      await deliverNotification(h.deps, delivery.id, { number: 2, isFinalAttempt: false }),
+    ).toBe('skipped');
+  });
+
+  it('keeps 5xx failures pending for retry and fails on the final attempt', async () => {
+    respond = 503;
+    const { delivery } = await pendingAlertDelivery();
+    await expect(
+      deliverNotification(h.deps, delivery.id, { number: 1, isFinalAttempt: false }),
+    ).rejects.toThrow(/503/);
+    expect(
+      await prisma.notificationDelivery.findUniqueOrThrow({ where: { id: delivery.id } }),
+    ).toMatchObject({
+      status: 'PENDING',
+      attempts: 1,
+      responseStatus: 503,
+    });
+    await expect(
+      deliverNotification(h.deps, delivery.id, { number: 6, isFinalAttempt: true }),
+    ).rejects.toThrow();
+    expect(
+      (await prisma.notificationDelivery.findUniqueOrThrow({ where: { id: delivery.id } })).status,
+    ).toBe('FAILED');
+  });
+
+  it('fails immediately on 4xx responses', async () => {
+    respond = 404;
+    const { delivery } = await pendingAlertDelivery();
+    await expect(
+      deliverNotification(h.deps, delivery.id, { number: 1, isFinalAttempt: false }),
+    ).rejects.toThrow(/404/);
+    expect(
+      (await prisma.notificationDelivery.findUniqueOrThrow({ where: { id: delivery.id } })).status,
+    ).toBe('FAILED');
+  });
+
+  it('blocks private addresses when configured', async () => {
+    h = createHarness({ WEBHOOK_BLOCK_PRIVATE_IPS: 'true' });
+    const { delivery } = await pendingAlertDelivery();
+    await expect(
+      deliverNotification(h.deps, delivery.id, { number: 1, isFinalAttempt: false }),
+    ).rejects.toThrow(/private address/);
+    expect(received).toHaveLength(0);
+    expect(
+      (await prisma.notificationDelivery.findUniqueOrThrow({ where: { id: delivery.id } })).status,
+    ).toBe('FAILED');
+  });
+
+  it('sends test notifications by email', async () => {
+    const d = await prisma.notificationDestination.create({
+      data: { name: 'mail', type: 'EMAIL', config: { to: ['ops@example.com'] } },
+    });
+    const delivery = await prisma.notificationDelivery.create({
+      data: { destinationId: d.id, kind: 'test' },
+    });
+    await deliverNotification(h.deps, delivery.id, { number: 1, isFinalAttempt: false });
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]).toMatchObject({ to: ['ops@example.com'] });
+    expect(h.sent[0]!.subject).toContain('Test notification');
+  });
+});
+
+describe('maintenance', () => {
+  it('prunes events past the retention period', async () => {
+    const c = await createContract(40);
+    const base = {
+      contractRefId: c.id,
+      network: 'TESTNET' as const,
+      type: 'contract',
+      txHash: 'a'.repeat(64),
+      topics: [],
+      topicsXdr: [],
+      value: {},
+      valueXdr: '',
+    };
+    await prisma.event.createMany({
+      data: [
+        { ...base, eventId: 'old', ledger: 1, ledgerClosedAt: past(40 * 86400_000) },
+        { ...base, eventId: 'new', ledger: 2, ledgerClosedAt: new Date() },
+      ],
+    });
+    expect(await pruneOldData(h.deps)).toEqual({ deleted: 1 });
+    expect((await prisma.event.findMany()).map((e) => e.eventId)).toEqual(['new']);
+  });
+});

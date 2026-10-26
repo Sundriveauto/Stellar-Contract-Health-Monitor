@@ -1,0 +1,29 @@
+import { formatDuration, ledgersToDuration } from '@stellar-health/ui';
+import type { AlertRule } from './types';
+
+export const RULE_TYPE_LABELS: Record<AlertRule['type'], string> = {
+  EVENT_MATCH: 'Event match',
+  TTL_EXPIRY: 'Storage TTL expiry',
+  INACTIVITY: 'Inactivity',
+};
+
+/** One-line human description of what a rule does. */
+export function describeRule(rule: Pick<AlertRule, 'type' | 'config' | 'cooldownSeconds'>): string {
+  const c = rule.config as Record<string, unknown>;
+  switch (rule.type) {
+    case 'EVENT_MATCH': {
+      const topics = (c.topics as string[] | undefined) ?? [];
+      const what = topics.length ? `events with topics [${topics.join(', ')}]` : 'any event';
+      const threshold = Number(c.threshold ?? 1);
+      return threshold > 1
+        ? `${threshold}+ ${what} within ${formatDuration(Number(c.windowSeconds ?? 300))}`
+        : `On ${what}`;
+    }
+    case 'TTL_EXPIRY': {
+      const ledgers = Number(c.ledgersThreshold ?? 0);
+      return `Storage with < ${ledgers.toLocaleString()} ledgers (~${ledgersToDuration(ledgers)}) to live`;
+    }
+    case 'INACTIVITY':
+      return `No events for ${formatDuration(Number(c.windowSeconds ?? 0))}`;
+  }
+}
