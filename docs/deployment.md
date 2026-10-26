@@ -72,6 +72,8 @@ See [`.env.example`](../.env.example) for every variable. The important ones:
 
 ## Monitoring
 
+Ready-made alert rules and a Grafana dashboard are described in [monitoring.md](monitoring.md).
+
 Both the API (`/metrics`) and the worker (`:4001/metrics`) expose Prometheus metrics. Useful
 alerts:
 
