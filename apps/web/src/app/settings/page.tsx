@@ -11,6 +11,7 @@ import {
   Field,
   Input,
   Mono,
+  Select,
   Spinner,
   StatusDot,
   Table,
@@ -20,7 +21,7 @@ import {
 } from '@stellar-health/ui';
 import { PageHeader } from '@/components/app-shell';
 import { CopyButton } from '@/components/copy-button';
-import { api, errorMessage, useApi } from '@/lib/api';
+import { api, errorMessage, useApi, useMe, type Role } from '@/lib/api';
 import type { Destination, Network, Page, Status } from '@/lib/types';
 
 interface NetworkSetting {
@@ -40,11 +41,29 @@ interface NetworkSetting {
 interface Token {
   id: string;
   name: string;
+  role: Role;
   prefix: string;
   createdAt: string;
   lastUsedAt: string | null;
   revokedAt: string | null;
 }
+
+interface AuditEntry {
+  id: string;
+  createdAt: string;
+  actorName: string;
+  method: string;
+  route: string;
+  path: string;
+  statusCode: number;
+  ip: string | null;
+}
+
+const ROLE_HELP: Record<Role, string> = {
+  VIEWER: 'Read-only access',
+  EDITOR: 'Manage contracts, rules, destinations and alerts',
+  ADMIN: 'Everything, including settings, tokens and the audit log',
+};
 
 interface Prefs {
   defaultCooldownSeconds: number;
@@ -53,17 +72,77 @@ interface Prefs {
 }
 
 export default function SettingsPage() {
+  const me = useMe();
+  const role = me.data?.principal.role;
   return (
     <div className="space-y-6">
       <PageHeader
         title="Settings"
         description="RPC providers, API access and notification preferences."
       />
+      {role && role !== 'ADMIN' && (
+        <Alert tone="blue" title={`Signed in with a ${role.toLowerCase()} token`}>
+          Changing settings and managing API tokens requires an admin token.
+        </Alert>
+      )}
       <RpcProviders />
-      <ApiTokens />
+      {role === 'ADMIN' && <ApiTokens />}
       <NotificationPreferences />
+      {role === 'ADMIN' && <AuditLog />}
       <SystemStatus />
     </div>
+  );
+}
+
+function AuditLog() {
+  const { data, isLoading } = useApi<Page<AuditEntry>>('/audit-log?limit=25', {
+    refreshInterval: 30_000,
+  });
+  return (
+    <Card>
+      <CardHeader
+        title="Audit log"
+        description="Every change made through the API or dashboard, including denied attempts."
+      />
+      {isLoading ? (
+        <div className="p-4">
+          <Spinner />
+        </div>
+      ) : !data?.items.length ? (
+        <EmptyState title="No changes recorded yet" />
+      ) : (
+        <Table>
+          <thead>
+            <tr>
+              <Th>When</Th>
+              <Th>Who</Th>
+              <Th>Action</Th>
+              <Th>Result</Th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+            {data.items.map((a) => (
+              <tr key={a.id} data-testid="audit-row">
+                <Td className="whitespace-nowrap">{timeAgo(a.createdAt)}</Td>
+                <Td>{a.actorName}</Td>
+                <Td>
+                  <Mono className="break-all">
+                    {a.method} {a.path}
+                  </Mono>
+                </Td>
+                <Td>
+                  <Badge
+                    tone={a.statusCode < 400 ? 'green' : a.statusCode === 403 ? 'yellow' : 'red'}
+                  >
+                    {a.statusCode}
+                  </Badge>
+                </Td>
+              </tr>
+            ))}
+          </tbody>
+        </Table>
+      )}
+    </Card>
   );
 }
 
@@ -228,6 +307,7 @@ function NetworkRow({ setting, onSaved }: { setting: NetworkSetting; onSaved: ()
 function ApiTokens() {
   const { data, mutate } = useApi<Page<Token>>('/settings/tokens');
   const [name, setName] = useState('');
+  const [role, setRole] = useState<Role>('VIEWER');
   const [created, setCreated] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -239,7 +319,7 @@ function ApiTokens() {
     try {
       const r = await api<{ token: string }>('/settings/tokens', {
         method: 'POST',
-        body: { name },
+        body: { name, role },
       });
       setCreated(r.token);
       setName('');
@@ -273,9 +353,24 @@ function ApiTokens() {
             />
           </Field>
         </div>
+        <div className="w-44">
+          <Field label="Role" htmlFor="token-role">
+            <Select
+              id="token-role"
+              value={role}
+              onChange={(e) => setRole(e.target.value as Role)}
+              title={ROLE_HELP[role]}
+            >
+              <option value="VIEWER">Viewer</option>
+              <option value="EDITOR">Editor</option>
+              <option value="ADMIN">Admin</option>
+            </Select>
+          </Field>
+        </div>
         <Button type="submit" loading={saving}>
           Create token
         </Button>
+        <p className="basis-full text-xs text-slate-500 dark:text-slate-400">{ROLE_HELP[role]}.</p>
       </form>
       <div className="space-y-2 px-4 pt-3 empty:hidden">
         {error && <Alert>{error}</Alert>}
@@ -301,6 +396,7 @@ function ApiTokens() {
           <thead>
             <tr>
               <Th>Name</Th>
+              <Th>Role</Th>
               <Th>Token</Th>
               <Th>Created</Th>
               <Th>Last used</Th>
@@ -311,6 +407,11 @@ function ApiTokens() {
             {data.items.map((t) => (
               <tr key={t.id}>
                 <Td className="font-medium">{t.name}</Td>
+                <Td>
+                  <Badge tone={t.role === 'ADMIN' ? 'indigo' : 'slate'}>
+                    {t.role.toLowerCase()}
+                  </Badge>
+                </Td>
                 <Td>
                   <Mono>{t.prefix}…</Mono>
                 </Td>

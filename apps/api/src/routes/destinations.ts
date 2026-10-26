@@ -1,6 +1,11 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import type { Prisma } from '@stellar-health/db';
+import {
+  openWebhookConfig,
+  sealWebhookConfig,
+  type NotificationDestination,
+  type Prisma,
+} from '@stellar-health/db';
 import { generateWebhookSecret } from '@stellar-health/alert-engine';
 import {
   createDestinationSchema,
@@ -12,7 +17,17 @@ import { notFound } from '../lib/errors';
 import { serializeDelivery, serializeDestination } from '../lib/serialize';
 import type { AppDeps } from '../app';
 
-export async function destinationRoutes(app: FastifyInstance, { prisma, jobs }: AppDeps) {
+export async function destinationRoutes(app: FastifyInstance, { prisma, jobs, secrets }: AppDeps) {
+  // Webhook secrets and header values are encrypted at rest; decrypt only to build responses.
+  const plain = (d: NotificationDestination) =>
+    d.type === 'WEBHOOK'
+      ? { ...d, config: openWebhookConfig(secrets, d.config) as Prisma.JsonValue }
+      : d;
+  const sealed = (type: string, config: unknown) =>
+    (type === 'WEBHOOK' ? sealWebhookConfig(secrets, config) : config) as Prisma.InputJsonValue;
+  const view = (d: NotificationDestination, opts?: { revealSecret?: boolean }) =>
+    serializeDestination(plain(d), opts);
+
   app.get('/destinations', async () => {
     const rows = await prisma.notificationDestination.findMany({ orderBy: { createdAt: 'desc' } });
     const stats = await prisma.notificationDelivery.groupBy({
@@ -22,7 +37,7 @@ export async function destinationRoutes(app: FastifyInstance, { prisma, jobs }: 
     });
     return {
       items: rows.map((d) => ({
-        ...serializeDestination(d),
+        ...view(d),
         last7Days: Object.fromEntries(
           stats.filter((s) => s.destinationId === d.id).map((s) => [s.status, s._count._all]),
         ),
@@ -41,12 +56,12 @@ export async function destinationRoutes(app: FastifyInstance, { prisma, jobs }: 
         name: body.name,
         type: body.type,
         enabled: body.enabled,
-        config: config as Prisma.InputJsonValue,
+        config: sealed(body.type, config),
       },
     });
     reply.status(201);
     // The secret is shown in full once, so the receiver can be configured.
-    return serializeDestination(d, { revealSecret: true });
+    return view(d, { revealSecret: true });
   });
 
   app.patch('/destinations/:id', async (req) => {
@@ -56,21 +71,24 @@ export async function destinationRoutes(app: FastifyInstance, { prisma, jobs }: 
     if (!existing) throw notFound('Destination');
     let config: Prisma.InputJsonValue | undefined;
     if (body.config) {
-      const current = existing.config as Record<string, unknown>;
+      const current = plain(existing).config as Record<string, unknown>;
       config =
         existing.type === 'WEBHOOK'
-          ? (webhookConfigSchema.parse({
-              ...current,
-              ...body.config,
-              secret: body.config.secret ?? current.secret,
-            }) as Prisma.InputJsonValue)
+          ? sealed(
+              'WEBHOOK',
+              webhookConfigSchema.parse({
+                ...current,
+                ...body.config,
+                secret: body.config.secret ?? current.secret,
+              }),
+            )
           : (emailConfigSchema.parse(body.config) as Prisma.InputJsonValue);
     }
     const d = await prisma.notificationDestination.update({
       where: { id },
       data: { name: body.name, enabled: body.enabled, config },
     });
-    return serializeDestination(d);
+    return view(d);
   });
 
   app.post('/destinations/:id/rotate-secret', async (req) => {
@@ -79,9 +97,14 @@ export async function destinationRoutes(app: FastifyInstance, { prisma, jobs }: 
     if (!existing || existing.type !== 'WEBHOOK') throw notFound('Webhook destination');
     const d = await prisma.notificationDestination.update({
       where: { id },
-      data: { config: { ...(existing.config as object), secret: generateWebhookSecret() } },
+      data: {
+        config: sealed('WEBHOOK', {
+          ...openWebhookConfig(secrets, existing.config),
+          secret: generateWebhookSecret(),
+        }),
+      },
     });
-    return serializeDestination(d, { revealSecret: true });
+    return view(d, { revealSecret: true });
   });
 
   app.delete('/destinations/:id', async (req, reply) => {

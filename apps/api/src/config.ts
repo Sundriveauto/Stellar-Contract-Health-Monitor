@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { parseEncryptionKey } from '@stellar-health/db';
 
 const bool = z
   .enum(['true', 'false', '1', '0', ''])
@@ -17,6 +18,19 @@ const envSchema = z.object({
   INITIAL_LOOKBACK_LEDGERS: z.coerce.number().int().min(0).default(17_280),
   RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(1).default(600),
   METRICS_TOKEN: z.string().optional(),
+  /** 32-byte key (hex or base64) used to encrypt webhook secrets at rest. Required in production. */
+  SECRETS_ENCRYPTION_KEY: z
+    .string()
+    .optional()
+    .transform((v) => v?.trim() || undefined)
+    .superRefine((v, ctx) => {
+      if (!v) return;
+      try {
+        parseEncryptionKey(v);
+      } catch (err) {
+        ctx.addIssue({ code: 'custom', message: (err as Error).message });
+      }
+    }),
   TRUST_PROXY: bool,
 });
 
@@ -35,6 +49,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     }
     if (cfg.ADMIN_API_TOKEN === 'change-me-to-a-long-random-string') {
       throw new Error('ADMIN_API_TOKEN is still set to the example value');
+    }
+    if (!cfg.SECRETS_ENCRYPTION_KEY) {
+      throw new Error(
+        'SECRETS_ENCRYPTION_KEY is required in production (generate with: openssl rand -base64 32)',
+      );
     }
   }
   return {

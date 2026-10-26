@@ -6,4 +6,5 @@ export const SEED = {
   destinationName: 'Seed webhook',
   ruleName: 'Seed mint rule',
   alertTitle: 'Seeded mint alert on E2E Token',
+  viewerToken: 'schm_e2e_viewer_token_0123456789abcdef',
 } as const;

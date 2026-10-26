@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { PrismaClient } from '../../packages/db/src/index';
 import { E2E_DATABASE_URL } from '../../playwright.config';
 import { migrateTestDatabase, resetDatabase } from '../support/test-db';
@@ -54,6 +55,14 @@ export default async function globalSetup() {
         valueXdr: '',
         inSuccessfulContractCall: true,
       })),
+    });
+    await prisma.apiToken.create({
+      data: {
+        name: 'E2E viewer',
+        role: 'VIEWER',
+        tokenHash: createHash('sha256').update(SEED.viewerToken).digest('hex'),
+        prefix: SEED.viewerToken.slice(0, 12),
+      },
     });
     const destination = await prisma.notificationDestination.create({
       data: {

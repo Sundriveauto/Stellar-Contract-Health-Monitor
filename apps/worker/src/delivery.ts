@@ -7,6 +7,7 @@ import {
   webhookConfigSchema,
   type WebhookPayload,
 } from '@stellar-health/shared-types';
+import { openWebhookConfig } from '@stellar-health/db';
 import type { WorkerDeps } from './deps';
 import { assertPublicUrl } from './ssrf';
 
@@ -75,7 +76,13 @@ export async function buildPayload(deps: WorkerDeps, deliveryId: string): Promis
 }
 
 async function sendWebhook(deps: DeliveryDeps, config: unknown, payload: WebhookPayload) {
-  const parsed = webhookConfigSchema.safeParse(config);
+  let opened: Record<string, unknown>;
+  try {
+    opened = openWebhookConfig(deps.secrets, config);
+  } catch (err) {
+    throw new PermanentDeliveryError(`Cannot read webhook secret: ${(err as Error).message}`);
+  }
+  const parsed = webhookConfigSchema.safeParse(opened);
   if (!parsed.success || !parsed.data.secret)
     throw new PermanentDeliveryError('Invalid webhook configuration');
   const { url, secret, headers } = parsed.data;

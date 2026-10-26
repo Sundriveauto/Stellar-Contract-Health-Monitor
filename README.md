@@ -12,6 +12,9 @@ or email when something needs attention.
   contracts that have gone quiet. Notifications go to signed webhooks or email, with retries and
   a full delivery history.
 - **Operational visibility** – health checks, Prometheus metrics, ingestion lag and gap detection.
+- **Built to scale and secure** – caught-up contracts are polled 25 per RPC call, role-based API
+  tokens (viewer / editor / admin), an audit log of every change, webhook secrets encrypted at
+  rest, and rate limiting shared across replicas.
 
 No custom smart contract is required: everything is read from Stellar RPC.
 
@@ -48,7 +51,8 @@ Open http://localhost:3000 and sign in with your `ADMIN_API_TOKEN`.
 ## Production
 
 ```bash
-cp .env.example .env    # set ADMIN_API_TOKEN, POSTGRES_PASSWORD, MAINNET_RPC_URL if needed
+cp .env.example .env    # set ADMIN_API_TOKEN, SECRETS_ENCRYPTION_KEY, POSTGRES_PASSWORD
+                        # (and MAINNET_RPC_URL for mainnet)
 docker compose up -d --build
 ```
 

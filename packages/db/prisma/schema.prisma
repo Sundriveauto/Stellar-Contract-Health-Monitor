@@ -134,6 +134,10 @@ model Event {
   @@index([ledger(sort: Desc), eventId(sort: Desc)])
   @@index([txHash])
   @@index([ledgerClosedAt])
+  /// Activity charts and inactivity checks per contract.
+  @@index([contractRefId, ledgerClosedAt])
+  /// Topic filter (`topics @> ARRAY[...]`) in the events explorer and API.
+  @@index([topics], type: Gin)
 }
 
 model StorageEntry {
@@ -247,9 +251,18 @@ model NotificationDelivery {
   @@index([destinationId])
 }
 
+/// What a token may do. VIEWER: read only. EDITOR: manage contracts, rules, destinations
+/// and alerts. ADMIN: also RPC settings, notification preferences, API tokens and the audit log.
+enum TokenRole {
+  VIEWER
+  EDITOR
+  ADMIN
+}
+
 model ApiToken {
   id         String    @id @default(cuid())
   name       String
+  role       TokenRole @default(ADMIN)
   /// SHA-256 hash of the token; the plaintext is only shown once at creation.
   tokenHash  String    @unique
   /// First characters of the token, for identification in the UI.
@@ -269,4 +282,24 @@ model WorkerHeartbeat {
   name       String   @id
   lastBeatAt DateTime
   info       Json
+}
+
+/// Every state-changing API request: who made it, what it targeted and the outcome.
+model AuditLog {
+  id         String   @id @default(cuid())
+  createdAt  DateTime @default(now())
+  /// "admin" for the bootstrap token, "token" for named API tokens.
+  actorType  String
+  actorId    String
+  actorName  String
+  method     String
+  /// Route pattern, e.g. /contracts/:id
+  route      String
+  /// Concrete path that was called, e.g. /contracts/cmv123
+  path       String
+  statusCode Int
+  ip         String?
+
+  @@index([createdAt])
+  @@index([actorId, createdAt])
 }

@@ -1,6 +1,6 @@
 import { StrKey } from '@stellar/stellar-sdk';
 import pino from 'pino';
-import { getPrisma } from '@stellar-health/db';
+import { createSecretBox, getPrisma } from '@stellar-health/db';
 import type {
   EventsPage,
   GetEventsParams,
@@ -12,6 +12,8 @@ import type {
 import { loadConfig } from '../../src/config';
 import type { DeliveryDeps, Mailer } from '../../src/delivery';
 import { createWorkerMetrics } from '../../src/metrics';
+
+export const TEST_SECRETS_KEY = 'cd'.repeat(32);
 
 export function contractId(seed: number): string {
   return StrKey.encodeContract(Buffer.alloc(32, seed));
@@ -133,6 +135,7 @@ export function createHarness(overrides: Record<string, string> = {}): Harness {
       queued.push(id);
     },
     now: () => now ?? new Date(),
+    secrets: createSecretBox(TEST_SECRETS_KEY),
     mailer: { send: async (m) => void sent.push(m) },
   };
   return { deps, rpc, queued, sent, setNow: (d) => (now = d) };

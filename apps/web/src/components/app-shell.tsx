@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useState, type ReactNode } from 'react';
 import { cn, StatusDot } from '@stellar-health/ui';
-import { useApi } from '@/lib/api';
+import { useApi, useMe } from '@/lib/api';
 import type { Status } from '@/lib/types';
 
 const NAV = [
@@ -23,6 +23,19 @@ const NAV = [
   },
   { href: '/settings', label: 'Settings', match: (p: string) => p.startsWith('/settings') },
 ];
+
+function SignedInAs() {
+  const { data } = useMe();
+  if (!data) return null;
+  return (
+    <p
+      className="truncate px-2 text-xs text-slate-500 dark:text-slate-400"
+      data-testid="signed-in-as"
+    >
+      {data.principal.name} · {data.principal.role.toLowerCase()}
+    </p>
+  );
+}
 
 function MonitoringStatus() {
   const { data, error } = useApi<Status>('/status', { refreshInterval: 15_000 });
@@ -98,6 +111,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         {nav}
         <div className="mt-auto space-y-1">
           <MonitoringStatus />
+          <SignedInAs />
           <form action="/logout" method="post">
             <button className="w-full rounded-md px-2 py-1.5 text-left text-xs text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800">
               Sign out

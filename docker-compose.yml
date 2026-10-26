@@ -1,5 +1,5 @@
 # Production-style deployment of the full stack.
-#   cp .env.example .env   # then set ADMIN_API_TOKEN and POSTGRES_PASSWORD
+#   cp .env.example .env   # then set ADMIN_API_TOKEN, SECRETS_ENCRYPTION_KEY and POSTGRES_PASSWORD
 #   docker compose up -d --build
 # Dashboard: http://localhost:${WEB_PORT:-3000}. The API is only reachable through the dashboard
 # unless you publish its port.
@@ -11,6 +11,7 @@ x-app-env: &app-env
   TESTNET_RPC_URL: ${TESTNET_RPC_URL:-}
   MAINNET_RPC_URL: ${MAINNET_RPC_URL:-}
   FUTURENET_RPC_URL: ${FUTURENET_RPC_URL:-}
+  SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:?set SECRETS_ENCRYPTION_KEY (openssl rand -base64 32)}
 
 services:
   postgres:

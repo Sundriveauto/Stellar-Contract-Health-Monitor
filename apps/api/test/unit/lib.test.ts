@@ -29,9 +29,11 @@ describe('loadConfig', () => {
         ADMIN_API_TOKEN: 'change-me-to-a-long-random-string',
       }),
     ).toThrow(/example value/);
+    const prod = { ...base, NODE_ENV: 'production', ADMIN_API_TOKEN: 'x'.repeat(32) };
+    expect(() => loadConfig(prod)).toThrow(/SECRETS_ENCRYPTION_KEY is required/);
+    expect(() => loadConfig({ ...prod, SECRETS_ENCRYPTION_KEY: 'short' })).toThrow(/32 bytes/);
     expect(
-      loadConfig({ ...base, NODE_ENV: 'production', ADMIN_API_TOKEN: 'x'.repeat(32) })
-        .ADMIN_API_TOKEN,
+      loadConfig({ ...prod, SECRETS_ENCRYPTION_KEY: 'ab'.repeat(32) }).ADMIN_API_TOKEN,
     ).toHaveLength(32);
   });
 });

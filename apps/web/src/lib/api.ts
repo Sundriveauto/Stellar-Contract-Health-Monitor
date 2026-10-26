@@ -49,6 +49,16 @@ export function useApi<T>(path: string | null, config?: SWRConfiguration<T>) {
   return useSWR<T>(path, (p: string) => api<T>(p), { revalidateOnFocus: true, ...config });
 }
 
+export type Role = 'VIEWER' | 'EDITOR' | 'ADMIN';
+export interface Me {
+  principal: { type: 'admin' | 'token'; id: string; name: string; role: Role };
+}
+
+/** The signed-in principal; used to hide controls the current token may not use. */
+export function useMe() {
+  return useApi<Me>('/auth/me', { revalidateOnFocus: false });
+}
+
 export function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   return 'Something went wrong';

@@ -1,6 +1,7 @@
 import { StrKey } from '@stellar/stellar-sdk';
 import type { FastifyInstance } from 'fastify';
-import { getPrisma } from '@stellar-health/db';
+import type { Redis } from 'ioredis';
+import { createSecretBox, getPrisma } from '@stellar-health/db';
 import type {
   ContractInfo,
   LedgerEntryTtl,
@@ -13,6 +14,7 @@ import type { JobBus } from '../../src/lib/jobs';
 import { createMetrics } from '../../src/lib/metrics';
 
 export const ADMIN_TOKEN = 'integration-test-admin-token-0123456789';
+export const TEST_SECRETS_KEY = 'ab'.repeat(32);
 export const auth = { authorization: `Bearer ${ADMIN_TOKEN}` };
 
 /** Deterministic, checksum-valid contract IDs. */
@@ -99,7 +101,9 @@ export interface TestContext {
   prisma: ReturnType<typeof getPrisma>;
 }
 
-export async function createTestApp(): Promise<TestContext> {
+export async function createTestApp(
+  opts: { rateLimit?: number; rateLimitRedis?: Redis } = {},
+): Promise<TestContext> {
   const prisma = getPrisma();
   const stellar = new FakeStellar();
   const jobs = new FakeJobs();
@@ -108,7 +112,7 @@ export async function createTestApp(): Promise<TestContext> {
     NODE_ENV: 'test',
     LOG_LEVEL: 'silent',
     ADMIN_API_TOKEN: ADMIN_TOKEN,
-    RATE_LIMIT_PER_MINUTE: '100000',
+    RATE_LIMIT_PER_MINUTE: String(opts.rateLimit ?? 100_000),
   });
   const app = await buildApp({
     config,
@@ -117,6 +121,8 @@ export async function createTestApp(): Promise<TestContext> {
     stellar: async () => stellar,
     jobs,
     metrics: createMetrics(),
+    secrets: createSecretBox(TEST_SECRETS_KEY),
+    rateLimitRedis: opts.rateLimitRedis,
   });
   await app.ready();
   return { app, stellar, jobs, prisma };

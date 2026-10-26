@@ -90,4 +90,10 @@ test('settings manages API tokens', async ({ page }) => {
   await expect(page.getByText(/copy your new token now/i)).toBeVisible();
   await expect(page.getByText(/schm_/).first()).toBeVisible();
   await expect(page.getByRole('cell', { name: 'E2E token' })).toBeVisible();
+
+  // The audit log records the token we just created.
+  await page.reload();
+  await expect(
+    page.getByTestId('audit-row').filter({ hasText: 'POST /settings/tokens' }).first(),
+  ).toBeVisible();
 });

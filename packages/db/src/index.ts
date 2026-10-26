@@ -26,3 +26,4 @@ export async function disconnectPrisma(): Promise<void> {
 }
 
 export * from './network-config';
+export * from './secrets';

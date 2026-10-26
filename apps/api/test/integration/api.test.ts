@@ -89,14 +89,14 @@ describe('status and auth', () => {
       method: 'POST',
       url: '/settings/tokens',
       headers: auth,
-      payload: { name: 'CI' },
+      payload: { name: 'CI', role: 'ADMIN' },
     });
     expect(created.statusCode).toBe(201);
     const { token, id } = created.json();
     expect(token).toMatch(/^schm_/);
 
     const asToken = await ctx.app.inject({ url: '/auth/me', headers: { 'x-api-key': token } });
-    expect(asToken.json().principal).toMatchObject({ type: 'token', name: 'CI' });
+    expect(asToken.json().principal).toMatchObject({ type: 'token', name: 'CI', role: 'ADMIN' });
 
     // The plaintext token is never listed again.
     const list = await ctx.app.inject({ url: '/settings/tokens', headers: auth });
@@ -151,6 +151,97 @@ describe('status and auth', () => {
       configured: true,
       latestLedger: 100_000,
     });
+  });
+});
+
+describe('roles and audit log', () => {
+  async function tokenFor(role: 'VIEWER' | 'EDITOR' | 'ADMIN') {
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: '/settings/tokens',
+      headers: auth,
+      payload: { name: `${role} token`, role },
+    });
+    expect(res.json().role).toBe(role);
+    return { authorization: `Bearer ${res.json().token}` };
+  }
+
+  it('defaults new tokens to the viewer role', async () => {
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: '/settings/tokens',
+      headers: auth,
+      payload: { name: 'x' },
+    });
+    expect(res.json().role).toBe('VIEWER');
+  });
+
+  it('lets viewers read but not change anything', async () => {
+    const c = await register(30);
+    const viewer = await tokenFor('VIEWER');
+    expect((await ctx.app.inject({ url: '/contracts', headers: viewer })).statusCode).toBe(200);
+    expect((await ctx.app.inject({ url: '/settings/networks', headers: viewer })).statusCode).toBe(
+      200,
+    );
+    const denied = await ctx.app.inject({
+      method: 'POST',
+      url: `/contracts/${c.id}/refresh`,
+      headers: viewer,
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json().error.code).toBe('FORBIDDEN');
+    expect((await ctx.app.inject({ url: '/settings/tokens', headers: viewer })).statusCode).toBe(
+      403,
+    );
+    expect((await ctx.app.inject({ url: '/audit-log', headers: viewer })).statusCode).toBe(403);
+  });
+
+  it('lets editors manage monitoring but not settings or tokens', async () => {
+    const c = await register(31);
+    const editor = await tokenFor('EDITOR');
+    const refresh = await ctx.app.inject({
+      method: 'POST',
+      url: `/contracts/${c.id}/refresh`,
+      headers: editor,
+    });
+    expect(refresh.statusCode).toBe(202);
+    const prefs = await ctx.app.inject({
+      method: 'PUT',
+      url: '/settings/notifications',
+      headers: editor,
+      payload: { notifyOnResolve: true },
+    });
+    expect(prefs.statusCode).toBe(403);
+    const mint = await ctx.app.inject({
+      method: 'POST',
+      url: '/settings/tokens',
+      headers: editor,
+      payload: { name: 'escalate', role: 'ADMIN' },
+    });
+    expect(mint.statusCode).toBe(403);
+  });
+
+  it('records every change, including denied attempts, in the audit log', async () => {
+    const c = await register(32);
+    const viewer = await tokenFor('VIEWER');
+    await ctx.app.inject({
+      method: 'PATCH',
+      url: `/contracts/${c.id}`,
+      headers: auth,
+      payload: { label: 'Renamed' },
+    });
+    await ctx.app.inject({ method: 'DELETE', url: `/contracts/${c.id}`, headers: viewer });
+    await ctx.app.inject({ url: '/contracts', headers: auth }); // reads are not audited
+
+    const log = (await ctx.app.inject({ url: '/audit-log?limit=10', headers: auth })).json();
+    const rows = log.items.map(
+      (r: { method: string; route: string; statusCode: number; actorName: string }) =>
+        [r.method, r.route, r.statusCode, r.actorName].join(' '),
+    );
+    expect(rows[0]).toBe('DELETE /contracts/:id 403 VIEWER token');
+    expect(rows[1]).toBe('PATCH /contracts/:id 200 Admin (bootstrap token)');
+    expect(rows.some((r: string) => r.startsWith('GET'))).toBe(false);
+    expect(log.items[0].path).toBe(`/contracts/${c.id}`);
   });
 });
 
@@ -397,6 +488,42 @@ describe('alert rules, destinations and alert history', () => {
       })
     ).json();
     expect(rotated.config.secret).not.toBe(d.config.secret);
+  });
+
+  it('stores webhook secrets and header values encrypted', async () => {
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: '/destinations',
+      headers: auth,
+      payload: {
+        type: 'WEBHOOK',
+        name: 'Enc',
+        config: {
+          url: 'https://example.com/h',
+          headers: { Authorization: 'Bearer downstream-token' },
+        },
+      },
+    });
+    const d = res.json();
+    const row = await ctx.prisma.notificationDestination.findUniqueOrThrow({ where: { id: d.id } });
+    const stored = JSON.stringify(row.config);
+    expect(stored).not.toContain(d.config.secret);
+    expect(stored).not.toContain('downstream-token');
+    expect((row.config as { secret: string }).secret).toMatch(/^enc:v1:/);
+
+    // Renaming keeps the secret usable; it is masked, never echoed.
+    const patched = await ctx.app.inject({
+      method: 'PATCH',
+      url: `/destinations/${d.id}`,
+      headers: auth,
+      payload: { config: { url: 'https://example.com/h2' } },
+    });
+    expect(patched.json().config.url).toBe('https://example.com/h2');
+    expect(patched.json().config.secret).not.toBe(d.config.secret);
+    const after = await ctx.prisma.notificationDestination.findUniqueOrThrow({
+      where: { id: d.id },
+    });
+    expect((after.config as { secret: string }).secret).toMatch(/^enc:v1:/);
   });
 
   it('rejects non-http webhook URLs and bad emails', async () => {

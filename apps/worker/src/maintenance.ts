@@ -1,3 +1,4 @@
+import { sealWebhookConfig, type Prisma } from '@stellar-health/db';
 import type { WorkerDeps } from './deps';
 
 /** Deletes events older than the retention period in batches, and stale worker heartbeats. */
@@ -19,4 +20,24 @@ export async function pruneOldData(deps: WorkerDeps) {
     where: { lastBeatAt: { lt: new Date(deps.now().getTime() - 86400_000) } },
   });
   return { deleted };
+}
+
+/**
+ * Encrypts webhook secrets that were stored before SECRETS_ENCRYPTION_KEY was configured.
+ * Runs at worker start-up; a no-op when no key is set or everything is already encrypted.
+ */
+export async function encryptLegacySecrets(deps: WorkerDeps): Promise<{ updated: number }> {
+  if (!deps.secrets.enabled) return { updated: 0 };
+  const rows = await deps.prisma.notificationDestination.findMany({ where: { type: 'WEBHOOK' } });
+  let updated = 0;
+  for (const row of rows) {
+    const sealed = sealWebhookConfig(deps.secrets, row.config);
+    if (JSON.stringify(sealed) === JSON.stringify(row.config)) continue;
+    await deps.prisma.notificationDestination.update({
+      where: { id: row.id },
+      data: { config: sealed as Prisma.InputJsonValue },
+    });
+    updated++;
+  }
+  return { updated };
 }

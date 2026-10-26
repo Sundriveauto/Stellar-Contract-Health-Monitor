@@ -6,8 +6,8 @@ import { disconnectPrisma, getPrisma } from '@stellar-health/db';
 import { resetDatabase } from '../../../../tests/support/test-db';
 import { deliverNotification } from '../../src/delivery';
 import { checkInactivity } from '../../src/inactivity';
-import { ingestContract } from '../../src/ingest';
-import { pruneOldData } from '../../src/maintenance';
+import { ingestBatch, ingestContract } from '../../src/ingest';
+import { encryptLegacySecrets, pruneOldData } from '../../src/maintenance';
 import { checkStorage } from '../../src/storage';
 import { createContract, createHarness, type Harness } from './helpers';
 
@@ -83,6 +83,80 @@ describe('event ingestion', () => {
     await prisma.contract.update({ where: { id: c.id }, data: { status: 'PAUSED' } });
     expect((await ingestContract(h.deps, c.id)).skipped).toBe('not_active');
     expect((await ingestContract(h.deps, 'missing')).skipped).toBe('not_found');
+  });
+});
+
+describe('batched ingestion', () => {
+  it('polls several contracts with one RPC stream and attributes events correctly', async () => {
+    const a = await createContract(50, { createdAt: past(3600_000) });
+    const b = await createContract(51, { createdAt: past(3600_000) });
+    await prisma.alertRule.create({
+      data: {
+        name: 'B mints',
+        type: 'EVENT_MATCH',
+        contractRefId: b.id,
+        config: { topics: ['mint'] },
+        createdAt: past(3600_000),
+      },
+    });
+    h.rpc.emit(a.contractId, 700, ['init']);
+    h.rpc.emit(b.contractId, 700, ['init']);
+    await ingestContract(h.deps, a.id);
+    await ingestContract(h.deps, b.id);
+
+    h.rpc.emit(a.contractId, 1001, ['transfer']);
+    h.rpc.emit(b.contractId, 1002, ['mint']);
+    h.rpc.emit(a.contractId, 1003, ['transfer']);
+    const callsBefore = h.rpc.calls.length;
+    const result = await ingestBatch(h.deps, [a.id, b.id]);
+
+    expect(result).toMatchObject({ contracts: 2, inserted: 3 });
+    expect(h.rpc.calls.length - callsBefore).toBe(1);
+    expect(h.rpc.calls.at(-1)!.contractIds.sort()).toEqual([a.contractId, b.contractId].sort());
+    expect(await prisma.event.count({ where: { contractRefId: a.id } })).toBe(3);
+    expect(await prisma.event.count({ where: { contractRefId: b.id } })).toBe(2);
+    const [ra, rb] = await Promise.all([
+      prisma.contract.findUniqueOrThrow({ where: { id: a.id } }),
+      prisma.contract.findUniqueOrThrow({ where: { id: b.id } }),
+    ]);
+    expect(ra.cursor).toBe(rb.cursor);
+    expect(ra.eventCount).toBe(3);
+    expect(rb.eventCount).toBe(2);
+    // Only contract B's rule fired, for B's mint.
+    const alerts = await prisma.alert.findMany();
+    expect(alerts.map((x) => x.contractRefId)).toEqual([b.id]);
+
+    // Nothing is re-inserted on the next batch.
+    expect((await ingestBatch(h.deps, [a.id, b.id])).inserted).toBe(0);
+  });
+
+  it('falls back to per-contract ingestion when the batch cursor is out of retention', async () => {
+    const a = await createContract(52);
+    const b = await createContract(53);
+    h.rpc.emit(a.contractId, 700, ['x']);
+    h.rpc.emit(b.contractId, 700, ['x']);
+    await ingestContract(h.deps, a.id);
+    await ingestContract(h.deps, b.id);
+    h.rpc.health.oldestLedger = 2000;
+    h.rpc.health.latestLedger = 2500;
+    h.rpc.emit(a.contractId, 2100, ['y']);
+    const result = await ingestBatch(h.deps, [a.id, b.id]);
+    expect(result.fallback).toBe('retention');
+    const rows = await prisma.contract.findMany({ where: { id: { in: [a.id, b.id] } } });
+    expect(rows.every((r) => r.gapDetectedAt !== null)).toBe(true);
+    expect(await prisma.event.count({ where: { contractRefId: a.id } })).toBe(2);
+  });
+
+  it('records the failure on every contract in the batch', async () => {
+    const a = await createContract(54);
+    const b = await createContract(55);
+    await prisma.contract.updateMany({ data: { cursor: '0000000000000000700-0000000000' } });
+    h.rpc.getEvents = async () => {
+      throw new Error('rpc exploded');
+    };
+    await expect(ingestBatch(h.deps, [a.id, b.id])).rejects.toThrow('rpc exploded');
+    const rows = await prisma.contract.findMany();
+    expect(rows.map((r) => r.consecutiveFailures)).toEqual([1, 1]);
   });
 });
 
@@ -376,6 +450,38 @@ describe('webhook delivery', () => {
       deliverNotification(h.deps, delivery.id, { number: 1, isFinalAttempt: false }),
     ).rejects.toThrow(/private address/);
     expect(received).toHaveLength(0);
+    expect(
+      (await prisma.notificationDelivery.findUniqueOrThrow({ where: { id: delivery.id } })).status,
+    ).toBe('FAILED');
+  });
+
+  it('signs with an encrypted secret, and encrypts legacy plaintext secrets', async () => {
+    const { delivery } = await pendingAlertDelivery();
+    // pendingAlertDelivery stores a plaintext secret, as older versions did.
+    expect(await encryptLegacySecrets(h.deps)).toEqual({ updated: 1 });
+    expect(await encryptLegacySecrets(h.deps)).toEqual({ updated: 0 });
+    const dest = await prisma.notificationDestination.findFirstOrThrow();
+    expect((dest.config as { secret: string }).secret).toMatch(/^enc:v1:/);
+
+    await deliverNotification(h.deps, delivery.id, { number: 1, isFinalAttempt: false });
+    const { headers, body } = received[0]!;
+    expect(
+      verifyWebhookSignature({
+        secret: 'whsec_test_secret_0123456789',
+        timestamp: Number(headers['x-schm-timestamp']),
+        body,
+        signature: String(headers['x-schm-signature']),
+      }),
+    ).toBe(true);
+  });
+
+  it('fails permanently when the secret cannot be decrypted', async () => {
+    const { delivery } = await pendingAlertDelivery();
+    await encryptLegacySecrets(h.deps);
+    h.deps.secrets = (await import('@stellar-health/db')).createSecretBox('ef'.repeat(32));
+    await expect(
+      deliverNotification(h.deps, delivery.id, { number: 1, isFinalAttempt: false }),
+    ).rejects.toThrow(/Cannot read webhook secret/);
     expect(
       (await prisma.notificationDelivery.findUniqueOrThrow({ where: { id: delivery.id } })).status,
     ).toBe('FAILED');

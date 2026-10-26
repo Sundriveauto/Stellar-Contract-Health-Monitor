@@ -1,5 +1,6 @@
 import { hostname } from 'node:os';
 import { z } from 'zod';
+import { parseEncryptionKey } from '@stellar-health/db';
 
 const bool = (def: boolean) =>
   z
@@ -17,6 +18,10 @@ const envSchema = z.object({
   INGEST_INTERVAL_MS: z.coerce.number().int().min(1000).default(10_000),
   INGEST_CONCURRENCY: z.coerce.number().int().min(1).max(50).default(5),
   INGEST_PAGE_LIMIT: z.coerce.number().int().min(1).max(10_000).default(200),
+  /** Caught-up contracts polled per RPC call (1 disables batching; RPC maximum is 25). */
+  INGEST_BATCH_SIZE: z.coerce.number().int().min(1).max(25).default(25),
+  /** Contracts further behind than this are polled individually until they catch up. */
+  INGEST_BATCH_MAX_LAG_LEDGERS: z.coerce.number().int().min(0).default(1000),
   INGEST_MAX_PAGES: z.coerce.number().int().min(1).max(1000).default(20),
   STORAGE_CHECK_INTERVAL_MS: z.coerce.number().int().min(10_000).default(300_000),
   INACTIVITY_CHECK_INTERVAL_MS: z.coerce.number().int().min(10_000).default(60_000),
@@ -31,6 +36,19 @@ const envSchema = z.object({
   SMTP_USER: z.string().optional(),
   SMTP_PASSWORD: z.string().optional(),
   SMTP_FROM: z.string().default('Stellar Health Monitor <alerts@example.com>'),
+  /** 32-byte key (hex or base64) for webhook secrets at rest; must match the API. */
+  SECRETS_ENCRYPTION_KEY: z
+    .string()
+    .optional()
+    .transform((v) => v?.trim() || undefined)
+    .superRefine((v, ctx) => {
+      if (!v) return;
+      try {
+        parseEncryptionKey(v);
+      } catch (err) {
+        ctx.addIssue({ code: 'custom', message: (err as Error).message });
+      }
+    }),
   PUBLIC_DASHBOARD_URL: z.string().default('http://localhost:3000'),
 });
 
@@ -41,6 +59,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `  ${i.path.join('.')}: ${i.message}`).join('\n');
     throw new Error(`Invalid worker configuration:\n${issues}`);
+  }
+  if (parsed.data.NODE_ENV === 'production' && !parsed.data.SECRETS_ENCRYPTION_KEY) {
+    throw new Error(
+      'SECRETS_ENCRYPTION_KEY is required in production (generate with: openssl rand -base64 32)',
+    );
   }
   return parsed.data;
 }

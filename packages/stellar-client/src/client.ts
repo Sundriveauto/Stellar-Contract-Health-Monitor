@@ -4,6 +4,9 @@ import { contractCodeLedgerKey, contractInstanceLedgerKey, ledgerKeyToXdr } from
 import { withRetry } from './retry';
 import { decodeScVal } from './scval';
 
+/** Upper bound of contract IDs in one getEvents call (5 filters x 5 IDs). */
+export const MAX_CONTRACTS_PER_REQUEST = 25;
+
 export interface RpcHealth {
   status: string;
   latestLedger: number;
@@ -135,14 +138,17 @@ export class StellarRpcClient implements StellarClient {
   }
 
   async getEvents(params: GetEventsParams): Promise<EventsPage> {
-    if (params.contractIds.length === 0 || params.contractIds.length > 5) {
+    const ids = params.contractIds;
+    if (ids.length === 0 || ids.length > MAX_CONTRACTS_PER_REQUEST) {
       throw new RpcError(
-        'getEvents supports 1-5 contract IDs per filter',
+        `getEvents supports 1-${MAX_CONTRACTS_PER_REQUEST} contract IDs per request`,
         'invalid_request',
         false,
       );
     }
-    const filters: rpc.Api.EventFilter[] = [{ contractIds: params.contractIds }];
+    // RPC allows 5 filters of 5 contract IDs each; filters are OR-ed together.
+    const filters: rpc.Api.EventFilter[] = [];
+    for (let i = 0; i < ids.length; i += 5) filters.push({ contractIds: ids.slice(i, i + 5) });
     const limit = params.limit ?? 200;
     const request: rpc.Api.GetEventsRequest =
       params.cursor !== undefined

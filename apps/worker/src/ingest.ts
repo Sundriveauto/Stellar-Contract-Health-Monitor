@@ -181,6 +181,144 @@ export async function ingestContract(
   }
 }
 
+export interface BatchIngestResult {
+  contracts: number;
+  pages: number;
+  fetched: number;
+  inserted: number;
+  latestLedger: number | null;
+  /** Set when the batch could not run as a group and each contract was ingested on its own. */
+  fallback?: 'retention' | 'single';
+}
+
+/** Stellar RPC accepts at most 5 filters of 5 contract IDs in one getEvents call. */
+export const MAX_BATCH_CONTRACTS = 25;
+
+/**
+ * Ingests several caught-up contracts on one network with a single getEvents stream, cutting RPC
+ * calls by up to 25x compared to polling each contract separately.
+ *
+ * The batch starts from the furthest-behind cursor; contracts that were already further ahead
+ * see a few events again, which are de-duplicated on insert. If that position has fallen out
+ * of RPC retention, every contract is ingested on its own so gaps are recorded per contract.
+ */
+export async function ingestBatch(
+  deps: WorkerDeps,
+  contractRefIds: string[],
+): Promise<BatchIngestResult> {
+  const { prisma, config, metrics } = deps;
+  const all = await prisma.contract.findMany({
+    where: { id: { in: contractRefIds.slice(0, MAX_BATCH_CONTRACTS) }, status: 'ACTIVE' },
+  });
+  const empty = { pages: 0, fetched: 0, inserted: 0, latestLedger: null };
+  if (all.length === 0) return { contracts: 0, ...empty };
+
+  // A batch needs one network and an existing cursor for every member.
+  const network = all[0]!.network as Network;
+  const contracts = all.filter((c) => c.network === network && c.cursor);
+  const singles = all.filter((c) => !contracts.includes(c));
+  for (const c of singles) await ingestContract(deps, c.id).catch(() => undefined);
+  if (contracts.length <= 1) {
+    for (const c of contracts) await ingestContract(deps, c.id);
+    return { contracts: all.length, ...empty, fallback: 'single' };
+  }
+
+  const timer = metrics.ingestDuration.labels(network).startTimer();
+  const byContractId = new Map(contracts.map((c) => [c.contractId, c]));
+  const fresh = new Map<string, NormalizedEvent[]>(contracts.map((c) => [c.id, []]));
+  let cursor = contracts.map((c) => c.cursor!).sort()[0]!;
+  let latestLedger: number | null = null;
+  let oldestLedger: number | null = null;
+  let pages = 0;
+  let fetched = 0;
+
+  try {
+    const client = await deps.getClient(network);
+    while (pages < config.INGEST_MAX_PAGES) {
+      let page: EventsPage;
+      try {
+        page = await client.getEvents({
+          contractIds: contracts.map((c) => c.contractId),
+          cursor,
+          limit: config.INGEST_PAGE_LIMIT,
+        });
+      } catch (err) {
+        const retention =
+          isOutOfRetentionError(err) || (err instanceof RpcError && err.kind === 'invalid_request');
+        if (!retention || pages > 0) throw err;
+        for (const c of contracts) await ingestContract(deps, c.id).catch(() => undefined);
+        return { contracts: all.length, ...empty, fallback: 'retention' };
+      }
+      pages++;
+      fetched += page.events.length;
+      latestLedger = page.latestLedger;
+      oldestLedger = page.oldestLedger;
+      cursor = page.cursor || cursor;
+      for (const c of contracts) {
+        const own = page.events.filter((e) => e.contractId && byContractId.get(e.contractId) === c);
+        fresh.get(c.id)!.push(...(await storeEvents(deps, c, own)));
+      }
+      if (page.events.length < config.INGEST_PAGE_LIMIT) break;
+    }
+
+    const now = deps.now();
+    let inserted = 0;
+    for (const c of contracts) {
+      const events = fresh.get(c.id)!;
+      inserted += events.length;
+      const lastEventAt = events.reduce<Date | null>(
+        (max, e) => (!max || e.ledgerClosedAt > max ? e.ledgerClosedAt : max),
+        c.lastEventAt,
+      );
+      await prisma.contract.update({
+        where: { id: c.id },
+        data: {
+          cursor,
+          lastIngestedLedger: latestLedger ?? c.lastIngestedLedger,
+          lastPolledAt: now,
+          lastEventAt,
+          lastError: null,
+          consecutiveFailures: 0,
+          eventCount: { increment: events.length },
+        },
+      });
+    }
+    if (latestLedger !== null) {
+      await prisma.networkState.upsert({
+        where: { network },
+        create: { network, latestLedger, oldestLedger, lastCheckedAt: now },
+        update: {
+          latestLedger,
+          oldestLedger: oldestLedger ?? undefined,
+          lastCheckedAt: now,
+          lastError: null,
+        },
+      });
+    }
+    metrics.eventsIngested.labels(network).inc(inserted);
+    metrics.ingestRuns.labels(network, 'ok').inc(contracts.length);
+
+    for (const c of contracts) {
+      const events = fresh.get(c.id)!;
+      if (events.length > 0) await evaluateEventRules(deps, c, events);
+    }
+    return { contracts: all.length, pages, fetched, inserted, latestLedger };
+  } catch (err) {
+    metrics.ingestRuns.labels(network, 'error').inc(contracts.length);
+    await prisma.contract.updateMany({
+      where: { id: { in: contracts.map((c) => c.id) } },
+      data: {
+        lastPolledAt: deps.now(),
+        lastError: (err as Error).message.slice(0, 1000),
+        consecutiveFailures: { increment: 1 },
+      },
+    });
+    throw err;
+  } finally {
+    timer();
+  }
+}
+
 /** Inserts events, returning only those that were not already stored. */
 async function storeEvents(
   deps: WorkerDeps,

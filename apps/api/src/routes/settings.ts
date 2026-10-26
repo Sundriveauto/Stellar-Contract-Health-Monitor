@@ -5,12 +5,14 @@ import { resolveAllNetworkConfigs } from '@stellar-health/db';
 import {
   NETWORK_DEFAULTS,
   createApiTokenSchema,
+  listAuditLogQuerySchema,
   networkSchema,
   notificationPreferencesSchema,
   upsertNetworkConfigSchema,
 } from '@stellar-health/shared-types';
 import { StellarRpcClient } from '@stellar-health/stellar-client';
 import { HttpError } from '../lib/errors';
+import { toPage } from '../lib/pagination';
 import { generateApiToken, hashToken } from '../lib/tokens';
 import type { AppDeps } from '../app';
 
@@ -101,6 +103,7 @@ export async function settingsRoutes(app: FastifyInstance, { prisma }: AppDeps) 
       items: rows.map((t) => ({
         id: t.id,
         name: t.name,
+        role: t.role,
         prefix: t.prefix,
         createdAt: t.createdAt,
         lastUsedAt: t.lastUsedAt,
@@ -113,11 +116,23 @@ export async function settingsRoutes(app: FastifyInstance, { prisma }: AppDeps) 
     const body = createApiTokenSchema.parse(req.body);
     const token = generateApiToken();
     const row = await prisma.apiToken.create({
-      data: { name: body.name, tokenHash: hashToken(token), prefix: token.slice(0, 12) },
+      data: {
+        name: body.name,
+        role: body.role,
+        tokenHash: hashToken(token),
+        prefix: token.slice(0, 12),
+      },
     });
     reply.status(201);
     // Plaintext token is returned exactly once.
-    return { id: row.id, name: row.name, prefix: row.prefix, createdAt: row.createdAt, token };
+    return {
+      id: row.id,
+      name: row.name,
+      role: row.role,
+      prefix: row.prefix,
+      createdAt: row.createdAt,
+      token,
+    };
   });
 
   app.delete('/settings/tokens/:id', async (req, reply) => {
@@ -131,6 +146,18 @@ export async function settingsRoutes(app: FastifyInstance, { prisma }: AppDeps) 
     }
     await prisma.apiToken.update({ where: { id }, data: { revokedAt: new Date() } });
     reply.status(204);
+  });
+
+  // ---- Audit log ----
+  app.get('/audit-log', async (req) => {
+    const q = listAuditLogQuerySchema.parse(req.query);
+    const rows = await prisma.auditLog.findMany({
+      where: { actorId: q.actorId, method: q.method },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: q.limit + 1,
+      ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
+    });
+    return toPage(rows, q.limit);
   });
 
   // ---- Notification preferences ----

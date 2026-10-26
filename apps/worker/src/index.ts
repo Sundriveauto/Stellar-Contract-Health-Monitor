@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { Queue, UnrecoverableError, Worker, type Job } from 'bullmq';
 import { Redis } from 'ioredis';
 import pino from 'pino';
-import { disconnectPrisma, getPrisma, type Prisma } from '@stellar-health/db';
+import { createSecretBox, disconnectPrisma, getPrisma, type Prisma } from '@stellar-health/db';
 import {
   QUEUES,
   type IngestJobData,
@@ -14,9 +14,10 @@ import { loadConfig } from './config';
 import { deliverNotification, PermanentDeliveryError, type DeliveryDeps } from './delivery';
 import type { WorkerDeps } from './deps';
 import { checkInactivity } from './inactivity';
-import { ingestContract } from './ingest';
+import { ingestBatch, ingestContract } from './ingest';
+import { planIngestJobs } from './plan';
 import { createMailer } from './mailer';
-import { pruneOldData } from './maintenance';
+import { encryptLegacySecrets, pruneOldData } from './maintenance';
 import { createWorkerMetrics } from './metrics';
 import { createClientFactory, NetworkNotConfiguredError } from './rpc';
 import { checkStorage } from './storage';
@@ -46,6 +47,7 @@ async function main() {
     logger,
     metrics,
     now: () => new Date(),
+    secrets: createSecretBox(config.SECRETS_ENCRYPTION_KEY),
     getClient: createClientFactory(prisma, metrics),
     mailer: createMailer(config),
     enqueueDelivery: async (deliveryId) => {
@@ -63,6 +65,11 @@ async function main() {
     },
   };
   const baseDeps: WorkerDeps = deps;
+  const legacy = await encryptLegacySecrets(baseDeps);
+  if (legacy.updated > 0)
+    logger.info(legacy, 'encrypted webhook secrets stored before encryption was enabled');
+  if (!deps.secrets.enabled)
+    logger.warn('SECRETS_ENCRYPTION_KEY is not set: webhook secrets are stored unencrypted');
 
   // ---- Recurring schedules (idempotent: safe with several worker replicas) ----
   const schedules: [SchedulerJobName, number][] = [
@@ -95,13 +102,44 @@ async function main() {
     return contracts.length;
   };
 
+  const fanOutIngest = async () => {
+    const [contracts, states] = await Promise.all([
+      prisma.contract.findMany({
+        where: { status: 'ACTIVE' },
+        select: { id: true, network: true, cursor: true, lastIngestedLedger: true },
+      }),
+      prisma.networkState.findMany({ select: { network: true, latestLedger: true } }),
+    ]);
+    const latest = new Map(
+      states
+        .filter((s) => s.latestLedger !== null)
+        .map((s) => [s.network as string, s.latestLedger!]),
+    );
+    const jobs = planIngestJobs(contracts, latest, {
+      batchSize: config.INGEST_BATCH_SIZE,
+      maxLagLedgers: config.INGEST_BATCH_MAX_LAG_LEDGERS,
+    });
+    await ingestQueue.addBulk(
+      jobs.map((j) => ({
+        name: 'ingest',
+        data:
+          j.kind === 'batch'
+            ? { contractRefIds: j.contractRefIds }
+            : { contractRefId: j.contractRefId },
+        // One pending job per contract or batch: ticks never pile up behind a slow RPC.
+        opts: { jobId: j.jobId, removeOnComplete: true, removeOnFail: true },
+      })),
+    );
+    return { contracts: contracts.length, jobs: jobs.length };
+  };
+
   const workers = [
     new Worker(
       QUEUES.scheduler,
       async (job: Job) => {
         switch (job.name as SchedulerJobName) {
           case 'tick-ingest':
-            return { queued: await fanOut(ingestQueue, 'ingest') };
+            return fanOutIngest();
           case 'tick-storage':
             return { queued: await fanOut(storageQueue, 'storage') };
           case 'tick-inactivity':
@@ -116,7 +154,9 @@ async function main() {
       QUEUES.ingest,
       async (job) => {
         try {
-          return await ingestContract(baseDeps, job.data.contractRefId);
+          return 'contractRefIds' in job.data
+            ? await ingestBatch(baseDeps, job.data.contractRefIds)
+            : await ingestContract(baseDeps, job.data.contractRefId);
         } catch (err) {
           if (err instanceof NetworkNotConfiguredError) throw new UnrecoverableError(err.message);
           throw err;

@@ -12,7 +12,8 @@
     "migrate:deploy": "prisma migrate deploy",
     "seed": "tsx prisma/seed.ts",
     "typecheck": "tsc --noEmit",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+    "test": "vitest run"
   },
   "dependencies": {
     "@prisma/client": "6.19.3",
@@ -20,6 +21,7 @@
     "@stellar-health/shared-types": "workspace:*"
   },
   "devDependencies": {
-    "tsx": "^4.20.0"
+    "tsx": "^4.20.0",
+    "vitest": "^3.2.4"
   }
 }

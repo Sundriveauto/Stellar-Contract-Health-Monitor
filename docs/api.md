@@ -14,6 +14,25 @@ Authorization: Bearer <token>        # or: X-API-Key: <token>
 Tokens are either the bootstrap `ADMIN_API_TOKEN` or named tokens created in **Settings → API
 tokens** (`POST /settings/tokens`). Named tokens are stored hashed and shown once.
 
+### Roles
+
+Every named token has a role (default `VIEWER`):
+
+| Role     | Can                                                                                                                                         |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VIEWER` | Read everything except API tokens and the audit log                                                                                         |
+| `EDITOR` | Also register/pause/delete contracts, manage storage entries, alert rules and destinations, acknowledge/resolve alerts and retry deliveries |
+| `ADMIN`  | Also change RPC providers and notification preferences, manage API tokens and read the audit log                                            |
+
+The bootstrap token is always `ADMIN`. Requests without the needed role get `403 FORBIDDEN`.
+Give each person and integration its own token so the audit log shows who did what.
+
+### Audit log
+
+Every state-changing request (`POST`, `PUT`, `PATCH`, `DELETE`) is recorded with the token name,
+route, path, status code and client IP, including requests denied with `403`. Request bodies are
+never stored. Read it with `GET /audit-log` (admins only) or in **Settings → Audit log**.
+
 ## Errors
 
 ```json
@@ -30,10 +49,11 @@ tokens** (`POST /settings/tokens`). Named tokens are stored hashed and shown onc
 | ------ | ----------------------------------------------------------------------------------------------- |
 | 400    | `VALIDATION_ERROR`, `INVALID_CONTRACT_ID`, `INVALID_JSON`, `INVALID_DESTINATION`, `INVALID_KEY` |
 | 401    | `UNAUTHORIZED`                                                                                  |
+| 403    | `FORBIDDEN` – the token's role does not allow this                                              |
 | 404    | `NOT_FOUND`                                                                                     |
 | 409    | `ALREADY_REGISTERED`, `INVALID_STATE`, `CONFLICT`                                               |
 | 422    | `CONTRACT_NOT_FOUND`, `NETWORK_NOT_CONFIGURED`, `RPC_UNREACHABLE`, `NETWORK_MISMATCH`           |
-| 429    | rate limited (`RATE_LIMIT_PER_MINUTE`, default 600)                                             |
+| 429    | rate limited (`RATE_LIMIT_PER_MINUTE` per client IP, default 600, shared across replicas)       |
 | 502    | `RPC_ERROR` – the Stellar RPC failed                                                            |
 
 ## Pagination
@@ -123,9 +143,10 @@ Rule body:
 | PUT        | `/settings/networks/:network` | `{rpcUrl, networkPassphrase?, enabled?}` – probed before saving    |
 | DELETE     | `/settings/networks/:network` | Revert to the environment/default                                  |
 | POST       | `/settings/networks/test`     | `{rpcUrl}` – probe without saving                                  |
-| GET / POST | `/settings/tokens`            | List / create API tokens                                           |
+| GET / POST | `/settings/tokens`            | List / create API tokens (`{name, role}`)                          |
 | DELETE     | `/settings/tokens/:id`        | Revoke                                                             |
 | GET / PUT  | `/settings/notifications`     | `{defaultCooldownSeconds, defaultDestinationIds, notifyOnResolve}` |
+| GET        | `/audit-log`                  | `?actorId&method&limit&cursor` – newest first                      |
 
 ## Example
 

@@ -157,8 +157,20 @@ export const upsertNetworkConfigSchema = z.object({
   enabled: z.boolean().optional(),
 });
 
+export const TOKEN_ROLES = ['VIEWER', 'EDITOR', 'ADMIN'] as const;
+export type TokenRole = (typeof TOKEN_ROLES)[number];
+
 export const createApiTokenSchema = z.object({
   name: z.string().trim().min(1).max(120),
+  /** Least privilege by default. */
+  role: z.enum(TOKEN_ROLES).default('VIEWER'),
+});
+
+export const listAuditLogQuerySchema = z.object({
+  actorId: z.string().optional(),
+  method: z.enum(['POST', 'PUT', 'PATCH', 'DELETE']).optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  cursor: z.string().optional(),
 });
 
 export const notificationPreferencesSchema = z.object({

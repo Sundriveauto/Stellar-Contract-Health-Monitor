@@ -3,7 +3,7 @@ import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyInstance } from 'fastify';
 import type { Redis } from 'ioredis';
-import type { PrismaClient } from '@stellar-health/db';
+import type { PrismaClient, SecretBox } from '@stellar-health/db';
 import type { ApiConfig } from './config';
 import { authPlugin } from './lib/auth';
 import { errorHandler } from './lib/errors';
@@ -25,6 +25,9 @@ export interface AppDeps {
   stellar: StellarClientFactory;
   jobs: JobBus;
   metrics: ApiMetrics;
+  secrets: SecretBox;
+  /** When set, rate limits are shared across API replicas through Redis. */
+  rateLimitRedis?: Redis;
 }
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
@@ -76,6 +79,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   await app.register(rateLimit, {
     max: config.RATE_LIMIT_PER_MINUTE,
     timeWindow: '1 minute',
+    ...(deps.rateLimitRedis ? { redis: deps.rateLimitRedis, nameSpace: 'schm-ratelimit:' } : {}),
     allowList: (req) => req.url === '/health' || req.url === '/ready' || req.url === '/metrics',
   });
 

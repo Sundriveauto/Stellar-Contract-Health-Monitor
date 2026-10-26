@@ -36,9 +36,14 @@ monitor **stores events and the RPC cursor** instead of assuming history can be 
 
 1. On registration the API sets a start ledger (`INITIAL_LOOKBACK_LEDGERS` back, clamped to the
    oldest ledger the RPC still has) and queues an ingestion job.
-2. Every `INGEST_INTERVAL_MS` the worker fans out one ingestion job per active contract. Each job
-   pages through `getEvents` from the saved cursor, stores new events (de-duplicated by event ID),
-   and saves the new cursor.
+2. Every `INGEST_INTERVAL_MS` the worker plans ingestion jobs. Contracts that are caught up
+   (within `INGEST_BATCH_MAX_LAG_LEDGERS` of the network) are grouped per network into batches of
+   up to `INGEST_BATCH_SIZE` (max 25, the RPC limit of 5 filters × 5 contract IDs), so **one
+   `getEvents` call covers up to 25 contracts**. New contracts, contracts that are backfilling and
+   contracts recovering from a gap are polled on their own so they never hold a batch back. Each
+   job pages through `getEvents` from the saved cursor, stores new events (de-duplicated by event
+   ID) and saves the new cursor. A batch starts from its furthest-behind member; events that other
+   members already have are skipped on insert.
 3. If the saved cursor has fallen out of the RPC's retention window (for example after a long
    outage), ingestion restarts from the oldest available ledger and records `gapDetectedAt` on the
    contract, which the dashboard shows. `schm_ingestion_gaps_total` counts these.
@@ -64,10 +69,26 @@ Timeouts, network errors, `408`, `429` and `5xx` are retried; other `4xx` respon
 configuration and disabled destinations fail immediately. Every attempt is recorded and failed
 deliveries can be retried from Alert history. See [webhooks.md](webhooks.md).
 
+## Security
+
+- **Authentication**: bearer tokens, stored as SHA-256 hashes. The dashboard keeps its token in an
+  httpOnly cookie and calls the API through a server-side proxy.
+- **Authorization**: each token has a role (`VIEWER`, `EDITOR`, `ADMIN`), enforced centrally from
+  the method and route (`apps/api/src/lib/policy.ts`).
+- **Audit log**: every state-changing request, allowed or denied, is recorded.
+- **Secrets at rest**: webhook signing secrets and custom header values are encrypted with
+  AES-256-GCM using `SECRETS_ENCRYPTION_KEY` (required in production). Older plaintext values are
+  encrypted by the worker at start-up.
+- **Rate limiting**: per client IP, applied before authentication so token guessing is
+  throttled, and shared across API replicas through Redis.
+- **Webhooks**: HMAC-SHA256 signatures with timestamps, and optional blocking of private,
+  loopback and metadata addresses.
+
 ## Data model
 
 `Contract` → `Event`, `StorageEntry`, `Alert`. `AlertRule` (optionally scoped to a contract) →
 `AlertRuleState` (per contract: last trigger, open alert) → `Alert` → `NotificationDelivery` →
 `NotificationDestination`. `NetworkConfig` overrides the RPC URL from the environment;
-`NetworkState` caches the latest/oldest ledger per network. See
+`NetworkState` caches the latest/oldest ledger per network. `ApiToken` (with role) and
+`AuditLog` record access. See
 [`packages/db/prisma/schema.prisma`](../packages/db/prisma/schema.prisma).

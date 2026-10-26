@@ -6,9 +6,8 @@ export const QUEUES = {
   notifications: 'notifications',
 } as const;
 
-export interface IngestJobData {
-  contractRefId: string;
-}
+/** One contract, or a batch of caught-up contracts on the same network polled together. */
+export type IngestJobData = { contractRefId: string } | { contractRefIds: string[] };
 
 export interface StorageJobData {
   contractRefId: string;

@@ -1,5 +1,5 @@
 import type { Logger } from 'pino';
-import type { PrismaClient } from '@stellar-health/db';
+import type { PrismaClient, SecretBox } from '@stellar-health/db';
 import type { Network } from '@stellar-health/shared-types';
 import type { StellarClient } from '@stellar-health/stellar-client';
 import type { WorkerConfig } from './config';
@@ -14,4 +14,6 @@ export interface WorkerDeps {
   getClient(network: Network): Promise<StellarClient>;
   enqueueDelivery(deliveryId: string): Promise<void>;
   now(): Date;
+  /** Decrypts webhook secrets stored by the API. */
+  secrets: SecretBox;
 }

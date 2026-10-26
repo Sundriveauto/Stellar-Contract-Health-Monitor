@@ -1,5 +1,5 @@
 import { Redis } from 'ioredis';
-import { disconnectPrisma, getPrisma } from '@stellar-health/db';
+import { createSecretBox, disconnectPrisma, getPrisma } from '@stellar-health/db';
 import { buildApp } from './app';
 import { loadConfig } from './config';
 import { createJobBus } from './lib/jobs';
@@ -18,7 +18,12 @@ async function main() {
     jobs,
     stellar: createStellarClientFactory(prisma),
     metrics: createMetrics(),
+    secrets: createSecretBox(config.SECRETS_ENCRYPTION_KEY),
+    rateLimitRedis: redis,
   });
+  if (!config.SECRETS_ENCRYPTION_KEY) {
+    app.log.warn('SECRETS_ENCRYPTION_KEY is not set: webhook secrets are stored unencrypted');
+  }
 
   if (!config.ADMIN_API_TOKEN) {
     const tokens = await prisma.apiToken.count({ where: { revokedAt: null } });
