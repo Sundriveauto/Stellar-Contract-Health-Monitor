@@ -1,13 +1,4 @@
 {
-  "__inputs": [
-    {
-      "name": "DS_PROMETHEUS",
-      "label": "Prometheus",
-      "type": "datasource",
-      "pluginId": "prometheus",
-      "pluginName": "Prometheus"
-    }
-  ],
   "title": "Stellar Contract Health Monitor",
   "uid": "stellar-health",
   "schemaVersion": 39,
@@ -26,7 +17,7 @@
       "title": "Max ingestion lag (ledgers)",
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
@@ -68,7 +59,7 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "expr": "max(schm_ingestion_lag_ledgers_max)"
         }
@@ -80,7 +71,7 @@
       "title": "Events stored / min",
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 6,
@@ -114,7 +105,7 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "expr": "sum(rate(schm_events_ingested_total[5m])) * 60"
         }
@@ -126,7 +117,7 @@
       "title": "Alerts triggered (24h)",
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 12,
@@ -160,7 +151,7 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "expr": "sum(increase(schm_alerts_triggered_total[24h]))"
         }
@@ -172,7 +163,7 @@
       "title": "Failed notifications (24h)",
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 18,
@@ -210,7 +201,7 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "expr": "sum(increase(schm_notification_deliveries_total{result=\"failed\"}[24h]))"
         }
@@ -222,7 +213,7 @@
       "title": "Ingestion lag by network",
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
@@ -250,7 +241,7 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "expr": "schm_ingestion_lag_ledgers_max",
           "legendFormat": "{{network}}"
@@ -263,7 +254,7 @@
       "title": "Ingest runs",
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 12,
@@ -291,7 +282,7 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "expr": "sum by (network, result) (rate(schm_ingest_runs_total[5m]))",
           "legendFormat": "{{network}} {{result}}"
@@ -304,7 +295,7 @@
       "title": "Events ingested",
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
@@ -332,7 +323,7 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "expr": "sum by (network) (rate(schm_events_ingested_total[5m]))",
           "legendFormat": "{{network}}"
@@ -345,7 +336,7 @@
       "title": "Ingest duration p95",
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 12,
@@ -373,7 +364,7 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "expr": "histogram_quantile(0.95, sum by (le, network) (rate(schm_ingest_duration_seconds_bucket[5m])))",
           "legendFormat": "{{network}}"
@@ -386,7 +377,7 @@
       "title": "RPC latency p95",
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
@@ -414,7 +405,7 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "expr": "histogram_quantile(0.95, sum by (le, method) (rate(schm_rpc_call_duration_seconds_bucket[5m])))",
           "legendFormat": "{{method}}"
@@ -427,7 +418,7 @@
       "title": "RPC calls and retries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 12,
@@ -455,7 +446,7 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "expr": "sum by (method, result) (rate(schm_rpc_calls_total[5m]))",
           "legendFormat": "{{method}} {{result}}"
@@ -464,7 +455,7 @@
           "refId": "B",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "expr": "sum by (kind) (rate(schm_rpc_retries_total[5m]))",
           "legendFormat": "retry {{kind}}"
@@ -477,7 +468,7 @@
       "title": "Notification deliveries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
@@ -505,7 +496,7 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "expr": "sum by (type, result) (rate(schm_notification_deliveries_total[5m]))",
           "legendFormat": "{{type}} {{result}}"
@@ -518,7 +509,7 @@
       "title": "Queue depth",
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 12,
@@ -546,7 +537,7 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "expr": "sum by (queue, state) (schm_queue_jobs{state=~\"waiting|active|delayed|failed\"})",
           "legendFormat": "{{queue}} {{state}}"
@@ -559,7 +550,7 @@
       "title": "API request rate by status",
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
@@ -587,7 +578,7 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "expr": "sum by (status) (rate(schm_http_request_duration_seconds_count[5m]))",
           "legendFormat": "{{status}}"
@@ -600,7 +591,7 @@
       "title": "API latency p95 by route",
       "datasource": {
         "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
+        "uid": "${datasource}"
       },
       "gridPos": {
         "x": 12,
@@ -628,7 +619,7 @@
           "refId": "A",
           "datasource": {
             "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
+            "uid": "${datasource}"
           },
           "expr": "histogram_quantile(0.95, sum by (le, route) (rate(schm_http_request_duration_seconds_bucket[5m])))",
           "legendFormat": "{{route}}"
@@ -637,7 +628,17 @@
     }
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      }
+    ]
   },
   "annotations": {
     "list": []
