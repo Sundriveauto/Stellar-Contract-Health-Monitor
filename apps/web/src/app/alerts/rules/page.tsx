@@ -28,6 +28,7 @@ function RulesPage() {
   const destinations = useApi<Page<Destination>>('/destinations');
   const [showForm, setShowForm] = useState(Boolean(presetContract));
   const [editing, setEditing] = useState<AlertRule | null>(null);
+  const [copying, setCopying] = useState<AlertRule | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function toggle(rule: AlertRule) {
@@ -60,6 +61,7 @@ function RulesPage() {
             <Button
               onClick={() => {
                 setEditing(null);
+                setCopying(null);
                 setShowForm(true);
               }}
             >
@@ -71,18 +73,21 @@ function RulesPage() {
 
       {showForm && (
         <RuleForm
-          key={editing?.id ?? 'new'}
+          key={editing?.id ?? (copying ? `copy-${copying.id}` : 'new')}
           rule={editing}
+          copyFrom={editing ? null : copying}
           presetContractRefId={presetContract}
           contracts={contracts.data?.items ?? []}
           destinations={destinations.data?.items ?? []}
           onCancel={() => {
             setShowForm(false);
             setEditing(null);
+            setCopying(null);
           }}
           onSaved={async () => {
             setShowForm(false);
             setEditing(null);
+            setCopying(null);
             await rules.mutate();
           }}
         />
@@ -138,12 +143,25 @@ function RulesPage() {
                     size="sm"
                     variant="ghost"
                     onClick={() => {
+                      setCopying(null);
                       setEditing(r);
                       setShowForm(true);
                       window.scrollTo({ top: 0, behavior: 'smooth' });
                     }}
                   >
                     Edit
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      setEditing(null);
+                      setCopying(r);
+                      setShowForm(true);
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                  >
+                    Duplicate
                   </Button>
                   <Button
                     size="sm"
