@@ -30,6 +30,7 @@ import {
 } from '@stellar-health/ui';
 import { PageHeader } from '@/components/app-shell';
 import { ActivityChart } from '@/components/activity-chart';
+import { ContractLabel } from '@/components/contract-label';
 import { CopyButton } from '@/components/copy-button';
 import { EventTable } from '@/components/event-table';
 import { api, errorMessage, useApi } from '@/lib/api';
@@ -78,8 +79,8 @@ export default function ContractDetailPage() {
       <PageHeader
         title={
           <span className="flex flex-wrap items-center gap-2">
-            {c.label ?? 'Unnamed contract'} <HealthBadge health={c.health} />{' '}
-            <NetworkBadge network={c.network} />
+            <ContractLabel id={id} label={c.label} onSaved={() => contract.mutate()} />
+            <HealthBadge health={c.health} /> <NetworkBadge network={c.network} />
           </span>
         }
         description={
