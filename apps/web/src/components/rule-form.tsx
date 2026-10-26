@@ -18,9 +18,18 @@ import type { AlertRule, Contract, Destination } from '@/lib/types';
 type RuleType = AlertRule['type'];
 
 const LEDGERS_PER_DAY = 17_280;
+const NAME_MAX = 120;
+const COPY_SUFFIX = ' (copy)';
+
+/** Create-mode name for a duplicated rule, kept within the input max length. */
+function nameForCopy(name: string): string {
+  if (name.length + COPY_SUFFIX.length <= NAME_MAX) return `${name}${COPY_SUFFIX}`;
+  return `${name.slice(0, NAME_MAX - COPY_SUFFIX.length).trimEnd()}${COPY_SUFFIX}`;
+}
 
 export function RuleForm({
   rule,
+  copyFrom = null,
   presetContractRefId,
   contracts,
   destinations,
@@ -28,24 +37,28 @@ export function RuleForm({
   onSaved,
 }: {
   rule: AlertRule | null;
+  /** Prefills a new rule. Type and contract stay editable. Ignored while editing. */
+  copyFrom?: AlertRule | null;
   presetContractRefId?: string;
   contracts: Contract[];
   destinations: Destination[];
   onCancel: () => void;
   onSaved: () => void;
 }) {
-  const cfg = (rule?.config ?? {}) as Record<string, unknown>;
-  const [name, setName] = useState(rule?.name ?? '');
-  const [type, setType] = useState<RuleType>(rule?.type ?? 'EVENT_MATCH');
+  const seed = rule ?? copyFrom;
+  const copying = !rule && copyFrom != null;
+  const cfg = (seed?.config ?? {}) as Record<string, unknown>;
+  const [name, setName] = useState(copying ? nameForCopy(seed?.name ?? '') : (seed?.name ?? ''));
+  const [type, setType] = useState<RuleType>(seed?.type ?? 'EVENT_MATCH');
   const [contractRefId, setContractRefId] = useState(
-    rule?.contractRefId ?? presetContractRefId ?? '',
+    seed ? (seed.contractRefId ?? '') : (presetContractRefId ?? ''),
   );
-  const [severity, setSeverity] = useState(rule?.severity ?? 'WARNING');
+  const [severity, setSeverity] = useState(seed?.severity ?? 'WARNING');
   const [cooldownMinutes, setCooldownMinutes] = useState(
-    String((rule?.cooldownSeconds ?? 300) / 60),
+    String((seed?.cooldownSeconds ?? 300) / 60),
   );
   const [destinationIds, setDestinationIds] = useState<string[]>(
-    rule?.destinations.map((d) => d.id) ?? [],
+    seed?.destinations.map((d) => d.id) ?? [],
   );
   // EVENT_MATCH
   const [topics, setTopics] = useState(((cfg.topics as string[] | undefined) ?? []).join(', '));
