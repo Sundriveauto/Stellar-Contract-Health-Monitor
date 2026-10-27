@@ -93,7 +93,7 @@ Integration and e2e tests need `pnpm services:up`; e2e also needs
 
 - [Architecture](docs/architecture.md) – components, data flow, event retention
 - [API reference](docs/api.md) – REST endpoints and authentication
-- [Notifications](docs/notifications.md) – destination types (webhook, email, Slack, Discord, Teams, Telegram) and retries
+- [Notifications](docs/notifications.md) – destination types (webhook, email, Slack, Discord, Teams, Telegram, PagerDuty) and retries
 - [Webhooks](docs/webhooks.md) – payload format and signature verification
 - [Deployment](docs/deployment.md) – configuration and operations
 - [Performance](docs/performance.md) – load test (100–5,000 contracts) and a 60-minute testnet soak with every event verified
