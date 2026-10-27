@@ -130,7 +130,8 @@ export interface EventItem {
   inSuccessfulContractCall: boolean;
 }
 
-export type DestinationType = 'WEBHOOK' | 'EMAIL' | 'SLACK' | 'DISCORD' | 'TEAMS' | 'TELEGRAM';
+export type DestinationType =
+  'WEBHOOK' | 'EMAIL' | 'SLACK' | 'DISCORD' | 'TEAMS' | 'TELEGRAM' | 'PAGERDUTY';
 
 export interface Destination {
   id: string;
@@ -146,6 +147,8 @@ export interface Destination {
     webhookUrl?: string | null;
     /** Telegram chat; the bot token is never returned. */
     chatId?: string;
+    /** PagerDuty service region; the routing key is never returned. */
+    region?: 'us' | 'eu';
   };
   last7Days?: Record<string, number>;
   consecutiveFailures?: number;
