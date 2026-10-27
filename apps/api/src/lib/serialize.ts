@@ -237,6 +237,7 @@ export function serializeAlert(
   return {
     id: a.id,
     status: a.status,
+    silenced: a.silenced,
     severity: a.severity,
     title: a.title,
     message: a.message,
