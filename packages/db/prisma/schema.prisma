@@ -246,6 +246,7 @@ model Alert {
   resolvedBy      String?
   /// Optional note left when resolving.
   resolveNote     String?
+  silenced        Boolean                @default(false)
   deliveries      NotificationDelivery[]
 
   @@index([triggeredAt(sort: Desc)])
