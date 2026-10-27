@@ -84,6 +84,43 @@ describe('destination schemas', () => {
     expect(slack('https://hooks.slack.com.evil.com/x')).toBe(false);
     expect(slack('https://example.com/services/x')).toBe(false);
   });
+
+  it('accepts Discord channel webhook URLs only', () => {
+    const discord = (webhookUrl: string) =>
+      createDestinationSchema.safeParse({ type: 'DISCORD', name: 'd', config: { webhookUrl } })
+        .success;
+    expect(discord('https://discord.com/api/webhooks/123/abc')).toBe(true);
+    expect(discord('https://discordapp.com/api/webhooks/123/abc')).toBe(true);
+    expect(discord('https://discord.com/channels/123')).toBe(false);
+    expect(discord('http://discord.com/api/webhooks/123/abc')).toBe(false);
+    expect(discord('https://discord.com.evil.io/api/webhooks/1/a')).toBe(false);
+  });
+
+  it('accepts Teams incoming webhook and Workflows URLs', () => {
+    const teams = (webhookUrl: string) =>
+      createDestinationSchema.safeParse({ type: 'TEAMS', name: 't', config: { webhookUrl } })
+        .success;
+    expect(teams('https://contoso.webhook.office.com/webhookb2/abc')).toBe(true);
+    expect(teams('https://prod-12.westus.logic.azure.com:443/workflows/abc/triggers')).toBe(true);
+    expect(teams('https://default1.environment.api.powerplatform.com/powerautomate/x')).toBe(true);
+    expect(teams('https://webhook.office.com.evil.io/x')).toBe(false);
+    expect(teams('https://evilwebhook.office.com/x')).toBe(false);
+    expect(teams('http://contoso.webhook.office.com/x')).toBe(false);
+  });
+
+  it('validates Telegram bot tokens and chat IDs', () => {
+    const tg = (botToken: string, chatId: string) =>
+      createDestinationSchema.safeParse({
+        type: 'TELEGRAM',
+        name: 't',
+        config: { botToken, chatId },
+      }).success;
+    const token = '123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw';
+    expect(tg(token, '-1001234567890')).toBe(true);
+    expect(tg(token, '@my_channel')).toBe(true);
+    expect(tg(token, 'not a chat')).toBe(false);
+    expect(tg('123/../evil', '1')).toBe(false);
+  });
 });
 
 describe('listEventsQuerySchema', () => {

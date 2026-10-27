@@ -152,7 +152,12 @@ function safeDestinationConfig(
     case 'EMAIL':
       return { to: config.to };
     case 'SLACK':
+    case 'DISCORD':
+    case 'TEAMS':
       return { webhookUrl: maskUrl(config.webhookUrl) };
+    case 'TELEGRAM':
+      // The bot token is a credential for the whole bot: never return any of it.
+      return { chatId: config.chatId };
   }
 }
 

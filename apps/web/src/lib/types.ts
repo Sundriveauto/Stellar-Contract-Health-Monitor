@@ -116,7 +116,7 @@ export interface EventItem {
   inSuccessfulContractCall: boolean;
 }
 
-export type DestinationType = 'WEBHOOK' | 'EMAIL' | 'SLACK';
+export type DestinationType = 'WEBHOOK' | 'EMAIL' | 'SLACK' | 'DISCORD' | 'TEAMS' | 'TELEGRAM';
 
 export interface Destination {
   id: string;
@@ -128,8 +128,10 @@ export interface Destination {
     secret?: string | null;
     headers?: string[];
     to?: string[];
-    /** Masked chat webhook URL (Slack). */
+    /** Masked chat webhook URL (Slack, Discord, Teams). */
     webhookUrl?: string | null;
+    /** Telegram chat; the bot token is never returned. */
+    chatId?: string;
   };
   last7Days?: Record<string, number>;
   consecutiveFailures?: number;

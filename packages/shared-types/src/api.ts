@@ -130,7 +130,10 @@ export const emailConfigSchema = z.object({
   to: z.array(z.string().email()).min(1).max(20),
 });
 
-/** Builds a schema for an https URL on one of the given hosts (chat incoming webhooks). */
+/**
+ * Builds a schema for an https URL on one of the given hosts (chat incoming webhooks).
+ * A host written as `*.example.com` matches any subdomain of example.com.
+ */
 const httpsUrlOn = (hosts: string[], what: string) =>
   z
     .string()
@@ -141,7 +144,11 @@ const httpsUrlOn = (hosts: string[], what: string) =>
       (u) => {
         try {
           const parsed = new URL(u);
-          return parsed.protocol === 'https:' && hosts.includes(parsed.hostname.toLowerCase());
+          const host = parsed.hostname.toLowerCase();
+          return (
+            parsed.protocol === 'https:' &&
+            hosts.some((h) => (h.startsWith('*.') ? host.endsWith(h.slice(1)) : host === h))
+          );
         } catch {
           return false;
         }
@@ -153,11 +160,48 @@ export const slackConfigSchema = z.object({
   webhookUrl: httpsUrlOn(['hooks.slack.com'], 'Slack webhook URL'),
 });
 
+export const discordConfigSchema = z.object({
+  webhookUrl: httpsUrlOn(
+    ['discord.com', 'discordapp.com', 'ptb.discord.com', 'canary.discord.com'],
+    'Discord webhook URL',
+  ).refine(
+    (u) => new URL(u).pathname.startsWith('/api/webhooks/'),
+    'Discord webhook URL must look like https://discord.com/api/webhooks/<id>/<token>',
+  ),
+});
+
+/** Teams incoming webhooks (webhook.office.com) and Workflows / Power Automate URLs. */
+export const teamsConfigSchema = z.object({
+  webhookUrl: httpsUrlOn(
+    ['*.webhook.office.com', '*.logic.azure.com', '*.environment.api.powerplatform.com'],
+    'Teams webhook URL',
+  ),
+});
+
+export const telegramConfigSchema = z.object({
+  /** From @BotFather, e.g. `123456789:AA…`. Encrypted at rest and never returned by the API. */
+  botToken: z
+    .string()
+    .trim()
+    .regex(/^\d{3,20}:[A-Za-z0-9_-]{20,100}$/, 'Bot token must look like 123456789:AA…'),
+  /** Numeric chat ID (negative for groups and channels) or a public @channel username. */
+  chatId: z
+    .string()
+    .trim()
+    .regex(
+      /^(-?\d{1,20}|@[A-Za-z][A-Za-z0-9_]{4,31})$/,
+      'Chat ID must be a number such as -1001234567890 or a @channel username',
+    ),
+});
+
 /** Config schema per destination type, for validating updates and stored configs. */
 export const destinationConfigSchemas = {
   WEBHOOK: webhookConfigSchema,
   EMAIL: emailConfigSchema,
   SLACK: slackConfigSchema,
+  DISCORD: discordConfigSchema,
+  TEAMS: teamsConfigSchema,
+  TELEGRAM: telegramConfigSchema,
 } as const;
 
 export const createDestinationSchema = z.discriminatedUnion('type', [
@@ -178,6 +222,24 @@ export const createDestinationSchema = z.discriminatedUnion('type', [
     name: z.string().trim().min(1).max(120),
     enabled: z.boolean().default(true),
     config: slackConfigSchema,
+  }),
+  z.object({
+    type: z.literal('DISCORD'),
+    name: z.string().trim().min(1).max(120),
+    enabled: z.boolean().default(true),
+    config: discordConfigSchema,
+  }),
+  z.object({
+    type: z.literal('TEAMS'),
+    name: z.string().trim().min(1).max(120),
+    enabled: z.boolean().default(true),
+    config: teamsConfigSchema,
+  }),
+  z.object({
+    type: z.literal('TELEGRAM'),
+    name: z.string().trim().min(1).max(120),
+    enabled: z.boolean().default(true),
+    config: telegramConfigSchema,
   }),
 ]);
 

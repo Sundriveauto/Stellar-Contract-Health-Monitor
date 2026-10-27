@@ -807,8 +807,12 @@ describe('chat destinations', () => {
       });
   });
 
-  async function chatDelivery(type: 'SLACK', config: Record<string, unknown>) {
-    const c = await createContract(40);
+  let seed = 40;
+  async function chatDelivery(
+    type: 'SLACK' | 'DISCORD' | 'TEAMS' | 'TELEGRAM',
+    config: Record<string, unknown>,
+  ) {
+    const c = await createContract(seed++);
     const d = await prisma.notificationDestination.create({
       data: {
         name: type,
@@ -862,6 +866,61 @@ describe('chat destinations', () => {
     expect(
       (await prisma.notificationDelivery.findUniqueOrThrow({ where: { id: delivery.id } })).status,
     ).toBe('FAILED');
+  });
+
+  it('posts Discord embeds and retries 429 with the retry_after hint', async () => {
+    const webhookUrl = 'https://discord.com/api/webhooks/1/token';
+    const { delivery } = await chatDelivery('DISCORD', { webhookUrl });
+    respond = 204;
+    await expect(
+      deliverNotification(h.deps, delivery.id, { number: 1, isFinalAttempt: false }),
+    ).resolves.toBe('sent');
+    expect(received[0]!.url).toBe(webhookUrl);
+    const body = JSON.parse(received[0]!.body);
+    expect(body.allowed_mentions).toEqual({ parse: [] });
+    expect(body.embeds[0]).toMatchObject({ title: '[WARNING] Low <balance>', color: 0xf59e0b });
+
+    const again = await chatDelivery('DISCORD', { webhookUrl });
+    respond = 429;
+    const err = await deliverNotification(h.deps, again.delivery.id, {
+      number: 1,
+      isFinalAttempt: false,
+    }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ responseStatus: 429 });
+    expect(
+      (await prisma.notificationDelivery.findUniqueOrThrow({ where: { id: again.delivery.id } }))
+        .status,
+    ).toBe('PENDING');
+  });
+
+  it('posts an Adaptive Card to Teams', async () => {
+    const webhookUrl = 'https://contoso.webhook.office.com/webhookb2/abc';
+    const { delivery } = await chatDelivery('TEAMS', { webhookUrl });
+    await expect(
+      deliverNotification(h.deps, delivery.id, { number: 1, isFinalAttempt: false }),
+    ).resolves.toBe('sent');
+    expect(received[0]!.url).toBe(webhookUrl);
+    const body = JSON.parse(received[0]!.body);
+    expect(body.attachments[0].content).toMatchObject({
+      type: 'AdaptiveCard',
+      body: [{ text: '[WARNING] Low <balance>', color: 'Warning' }, {}, { type: 'FactSet' }],
+    });
+  });
+
+  it('sends Telegram messages with the encrypted bot token', async () => {
+    const botToken = '123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw';
+    const { delivery, destination } = await chatDelivery('TELEGRAM', {
+      botToken,
+      chatId: '-1001234567890',
+    });
+    expect(JSON.stringify(destination.config)).not.toContain(botToken);
+    await expect(
+      deliverNotification(h.deps, delivery.id, { number: 1, isFinalAttempt: false }),
+    ).resolves.toBe('sent');
+    expect(received[0]!.url).toBe(`https://api.telegram.org/bot${botToken}/sendMessage`);
+    const body = JSON.parse(received[0]!.body);
+    expect(body).toMatchObject({ chat_id: '-1001234567890', parse_mode: 'HTML' });
+    expect(body.text).toContain('<b>[WARNING] Low &lt;balance&gt;</b>');
   });
 
   it('rejects a stored Slack URL on another host', async () => {

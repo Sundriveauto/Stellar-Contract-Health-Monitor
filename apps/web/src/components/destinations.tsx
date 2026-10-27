@@ -32,6 +32,8 @@ export function DestinationsCard({
   const [name, setName] = useState('');
   const [url, setUrl] = useState('');
   const [emails, setEmails] = useState('');
+  const [botToken, setBotToken] = useState('');
+  const [chatId, setChatId] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [revealed, setRevealed] = useState<{ id: string; secret: string } | null>(null);
@@ -45,20 +47,24 @@ export function DestinationsCard({
       const config =
         type === 'WEBHOOK'
           ? { url }
-          : type === 'SLACK'
+          : type === 'SLACK' || type === 'DISCORD' || type === 'TEAMS'
             ? { webhookUrl: url }
-            : {
-                to: emails
-                  .split(',')
-                  .map((s) => s.trim())
-                  .filter(Boolean),
-              };
+            : type === 'TELEGRAM'
+              ? { botToken, chatId }
+              : {
+                  to: emails
+                    .split(',')
+                    .map((s) => s.trim())
+                    .filter(Boolean),
+                };
       const body = { type, name, config };
       const d = await api<Destination>('/destinations', { method: 'POST', body });
       if (d.config.secret) setRevealed({ id: d.id, secret: d.config.secret });
       setName('');
       setUrl('');
       setEmails('');
+      setBotToken('');
+      setChatId('');
       setAdding(false);
       onChange();
     } catch (err) {
@@ -84,7 +90,7 @@ export function DestinationsCard({
     <Card>
       <CardHeader
         title="Notification destinations"
-        description="Webhooks receive a signed JSON POST for every alert. Slack posts a formatted message to a channel. Email requires SMTP to be configured on the server."
+        description="Webhooks receive a signed JSON POST for every alert. Slack, Discord, Teams and Telegram post a formatted message to a chat. Email requires SMTP to be configured on the server."
         actions={
           <Button size="sm" variant="secondary" onClick={() => setAdding((a) => !a)}>
             {adding ? 'Cancel' : 'Add destination'}
@@ -106,6 +112,9 @@ export function DestinationsCard({
               <option value="WEBHOOK">Webhook</option>
               <option value="EMAIL">Email</option>
               <option value="SLACK">Slack</option>
+              <option value="DISCORD">Discord</option>
+              <option value="TEAMS">Microsoft Teams</option>
+              <option value="TELEGRAM">Telegram</option>
             </Select>
           </Field>
           <Field label="Name" htmlFor="d-name">
@@ -128,6 +137,51 @@ export function DestinationsCard({
                 placeholder="https://hooks.slack.com/services/…"
               />
             </Field>
+          ) : type === 'DISCORD' ? (
+            <Field label="Discord webhook URL" htmlFor="d-url">
+              <Input
+                id="d-url"
+                type="url"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                required
+                placeholder="https://discord.com/api/webhooks/…"
+              />
+            </Field>
+          ) : type === 'TEAMS' ? (
+            <Field label="Teams webhook URL" htmlFor="d-url">
+              <Input
+                id="d-url"
+                type="url"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                required
+                placeholder="https://….webhook.office.com/… or Workflows URL"
+              />
+            </Field>
+          ) : type === 'TELEGRAM' ? (
+            <>
+              <Field label="Bot token" htmlFor="d-bot" hint="From @BotFather; stored encrypted">
+                <Input
+                  id="d-bot"
+                  type="password"
+                  autoComplete="off"
+                  value={botToken}
+                  onChange={(e) => setBotToken(e.target.value)}
+                  required
+                  placeholder="123456789:AA…"
+                />
+              </Field>
+              <Field label="Chat ID" htmlFor="d-chat">
+                <Input
+                  id="d-chat"
+                  value={chatId}
+                  onChange={(e) => setChatId(e.target.value)}
+                  required
+                  placeholder="-1001234567890 or @channel"
+                />
+              </Field>
+            </>
           ) : type === 'WEBHOOK' ? (
             <Field label="URL" htmlFor="d-url">
               <Input
@@ -179,7 +233,7 @@ export function DestinationsCard({
       ) : !destinations?.length ? (
         <EmptyState
           title="No destinations"
-          description="Add a Slack channel, an email address or a webhook URL to receive alerts."
+          description="Add a Slack, Discord, Teams or Telegram chat, an email address or a webhook URL to receive alerts."
         />
       ) : (
         <ul className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -199,7 +253,9 @@ export function DestinationsCard({
                     ? d.config.url
                     : d.type === 'EMAIL'
                       ? d.config.to?.join(', ')
-                      : d.config.webhookUrl}
+                      : d.type === 'TELEGRAM'
+                        ? `chat ${d.config.chatId ?? ''}`
+                        : d.config.webhookUrl}
                   {d.config.secret && <> · secret {d.config.secret}</>}
                 </p>
                 {!d.enabled && d.disabledReason && (
