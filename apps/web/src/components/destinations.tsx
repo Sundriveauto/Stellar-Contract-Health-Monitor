@@ -214,7 +214,7 @@ export function DestinationsCard({
                   </p>
                 )}
                 {d.last7Days && Object.keys(d.last7Days).length > 0 && (
-                  <p className="text-xs text-slate-500">
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
                     Last 7 days: {d.last7Days.SUCCEEDED ?? 0} delivered, {d.last7Days.FAILED ?? 0}{' '}
                     failed, {d.last7Days.PENDING ?? 0} pending
                   </p>
