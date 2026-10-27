@@ -10,7 +10,10 @@ import {
   evaluateTtl,
   formatDuration,
   isCoolingDown,
+  matchesValueCondition,
   matchTopics,
+  toBigInt,
+  valueAtPath,
   ttlSeverity,
   type EventLike,
 } from '../src';
