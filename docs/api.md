@@ -100,11 +100,12 @@ command, and TTL alerts include the same command for entries that are still live
 
 ### Events
 
-| Method | Path             | Description                                                                               |
-| ------ | ---------------- | ----------------------------------------------------------------------------------------- |
-| GET    | `/events`        | `?contractRefId&contractId&network&topic&txHash&type&from&to&limit&cursor` – newest first |
-| GET    | `/events/topics` | `?contractRefId` – most common first topics                                               |
-| GET    | `/events/:id`    | One event with decoded value and raw XDR                                                  |
+| Method | Path             | Description                                                                                 |
+| ------ | ---------------- | ------------------------------------------------------------------------------------------- |
+| GET    | `/events`        | `?contractRefId&contractId&network&topic&txHash&type&from&to&limit&cursor` – newest first   |
+| GET    | `/events/export` | Same filters plus `format=csv\|ndjson`; streams up to 100,000 matching events as a download |
+| GET    | `/events/topics` | `?contractRefId` – most common first topics                                                 |
+| GET    | `/events/:id`    | One event with decoded value and raw XDR                                                    |
 
 ### Alert rules and destinations
 
